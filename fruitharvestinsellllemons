@@ -5,17 +5,72 @@ local player = Players.LocalPlayer
 
 setrobloxinput(true)
 
-local running = true
+local lemonFarmActive = false
+local autoBuyActive = false
 local lockFrom = nil
 local lockTarget = nil
 
--- Press 9 to stop
+local key1Down = false
+local key2Down = false
+local key9Down = false
+
+-- Find tycoon
+local myTycoon = nil
+for _, tycoon in pairs(workspace:GetChildren()) do
+    if tycoon.Name:find("Tycoon") then
+        local owner = tycoon:FindFirstChild("Owner")
+        if owner and tostring(owner.Value):find(player.Name) then
+            myTycoon = tycoon
+            break
+        end
+    end
+end
+
+print("=== Sell Lemons Script ===")
+print("1 = Toggle Auto Buy | 2 = Toggle Lemon Farm | 9 = Stop All")
+if myTycoon then
+    print("Tycoon found: " .. myTycoon.Name)
+else
+    print("WARNING: Tycoon not found!")
+end
+
 RunService.RenderStepped:Connect(function()
+    -- Key 1 (keycode 49) = toggle auto buy
+    if iskeypressed(49) then
+        if not key1Down then
+            key1Down = true
+            autoBuyActive = not autoBuyActive
+            lemonFarmActive = false -- stop lemon farm when auto buy starts
+            print("Auto Buy: " .. (autoBuyActive and "ON" or "OFF"))
+        end
+    else
+        key1Down = false
+    end
+
+    -- Key 2 (keycode 50) = toggle lemon farm
+    if iskeypressed(50) then
+        if not key2Down then
+            key2Down = true
+            lemonFarmActive = not lemonFarmActive
+            autoBuyActive = false -- stop auto buy when lemon farm starts
+            print("Lemon Farm: " .. (lemonFarmActive and "ON" or "OFF"))
+        end
+    else
+        key2Down = false
+    end
+
+    -- Key 9 (keycode 57) = stop all
     if iskeypressed(57) then
-        running = false
-        lockFrom = nil
-        lockTarget = nil
-        print("Autofarm stopped!")
+        if not key9Down then
+            key9Down = true
+            lemonFarmActive = false
+            autoBuyActive = false
+            lockFrom = nil
+            lockTarget = nil
+            print("Everything stopped!")
+        end
+    else
+        key9Down = false
     end
 
     if lockFrom and lockTarget then
@@ -23,60 +78,71 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
-print("Autofarm started! Press 9 to stop.")
+-- Single main loop - runs one mode at a time
+task.spawn(function()
+    while true do
+        local character = player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
 
-while running do
-    local character = player.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        -- AUTO BUY
+        if autoBuyActive and myTycoon and hrp then
+            for _, v in pairs(myTycoon:GetDescendants()) do
+                if not autoBuyActive then break end
+                if v.Name == "Button" and v:IsA("BasePart") then
+                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 3, v.Position.Z)
+                    task.wait(0.2)
+                end
+            end
+            print("Buy sweep done!")
+            task.wait(1)
 
-    if hrp then
-        for _, v in pairs(workspace:GetDescendants()) do
-            if not running then break end
-            if v.Name == "ClickPart" then
-                local fruit = v.Parent
-                local tree = fruit and fruit.Parent
+        -- LEMON FARM
+        elseif lemonFarmActive and hrp then
+            for _, v in pairs(workspace:GetDescendants()) do
+                if not lemonFarmActive then break end
+                if v.Name == "ClickPart" then
+                    local fruit = v.Parent
+                    local tree = fruit and fruit.Parent
 
-                -- Disable canopy blocking
-                local modified = {}
-                if tree then
-                    for _, part in pairs(tree:GetDescendants()) do
-                        if part:IsA("BasePart") and part ~= v then
-                            pcall(function()
-                                part.CanQuery = false
-                                table.insert(modified, part)
-                            end)
+                    local modified = {}
+                    if tree then
+                        for _, part in pairs(tree:GetDescendants()) do
+                            if part:IsA("BasePart") and part ~= v then
+                                pcall(function()
+                                    part.CanQuery = false
+                                    table.insert(modified, part)
+                                end)
+                            end
                         end
                     end
+
+                    local tpPos = Vector3.new(v.Position.X, v.Position.Y - 8, v.Position.Z)
+                    hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
+                    lockFrom = tpPos
+                    lockTarget = v.Position
+                    task.wait(0.1)
+
+                    local center = camera.ViewportSize / 2
+                    mousemoveabs(center.X, center.Y)
+                    mouse1click()
+                    task.wait(0.03)
+                    mouse1click()
+
+                    lockFrom = nil
+                    lockTarget = nil
+
+                    for _, part in pairs(modified) do
+                        pcall(function() part.CanQuery = true end)
+                    end
+
+                    task.wait(0.03)
                 end
-
-                -- Teleport BELOW fruit so canopy doesnt block view
-                local tpPos = Vector3.new(v.Position.X, v.Position.Y - 8, v.Position.Z)
-                hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
-
-                -- Lock camera looking UP at fruit from below
-                lockFrom = tpPos
-                lockTarget = v.Position
-                task.wait(0.1)
-
-                -- Click at screen center where fruit is
-                local center = camera.ViewportSize / 2
-                mousemoveabs(center.X, center.Y)
-                mouse1click()
-                task.wait(0.03)
-                mouse1click()
-
-                lockFrom = nil
-                lockTarget = nil
-
-                -- Restore canopy
-                for _, part in pairs(modified) do
-                    pcall(function() part.CanQuery = true end)
-                end
-
-                task.wait(0.03)
             end
+            print("Lemon sweep done!")
+            task.wait(0.5)
+
+        else
+            task.wait(0.1)
         end
-        if running then print("Sweep done!") end
     end
-    task.wait(0.5)
-end
+end)
