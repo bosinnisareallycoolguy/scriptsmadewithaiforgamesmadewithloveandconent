@@ -1,0 +1,82 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local camera = workspace.CurrentCamera
+local player = Players.LocalPlayer
+
+setrobloxinput(true)
+
+local running = true
+local lockFrom = nil
+local lockTarget = nil
+
+-- Press 9 to stop
+RunService.RenderStepped:Connect(function()
+    if iskeypressed(57) then
+        running = false
+        lockFrom = nil
+        lockTarget = nil
+        print("Autofarm stopped!")
+    end
+
+    if lockFrom and lockTarget then
+        camera.CFrame = CFrame.lookAt(lockFrom, lockTarget)
+    end
+end)
+
+print("Autofarm started! Press 9 to stop.")
+
+while running do
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+    if hrp then
+        for _, v in pairs(workspace:GetDescendants()) do
+            if not running then break end
+            if v.Name == "ClickPart" then
+                local fruit = v.Parent
+                local tree = fruit and fruit.Parent
+
+                -- Disable canopy blocking
+                local modified = {}
+                if tree then
+                    for _, part in pairs(tree:GetDescendants()) do
+                        if part:IsA("BasePart") and part ~= v then
+                            pcall(function()
+                                part.CanQuery = false
+                                table.insert(modified, part)
+                            end)
+                        end
+                    end
+                end
+
+                -- Teleport BELOW fruit so canopy doesnt block view
+                local tpPos = Vector3.new(v.Position.X, v.Position.Y - 8, v.Position.Z)
+                hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
+
+                -- Lock camera looking UP at fruit from below
+                lockFrom = tpPos
+                lockTarget = v.Position
+                task.wait(0.1)
+
+                -- Click at screen center where fruit is
+                local center = camera.ViewportSize / 2
+                mousemoveabs(center.X, center.Y)
+                mouse1click()
+                task.wait(0.03)
+                mouse1click()
+
+                lockFrom = nil
+                lockTarget = nil
+
+                -- Restore canopy
+                for _, part in pairs(modified) do
+                    pcall(function() part.CanQuery = true end)
+                end
+
+                task.wait(0.03)
+            end
+        end
+        if running then print("Sweep done!") end
+    end
+    task.wait(0.5)
+end
