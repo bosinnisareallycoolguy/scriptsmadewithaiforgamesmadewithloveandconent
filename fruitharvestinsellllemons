@@ -13,7 +13,6 @@ _G.SellLemonsActive = true
 
 local lemonFarmActive = false
 local autoBuyActive = false
-local currentFruit = nil
 local key1Down = false
 local key2Down = false
 local key9Down = false
@@ -36,16 +35,14 @@ print(myTycoon and "Tycoon found: " .. myTycoon.Name or "WARNING: Tycoon not fou
 RunService.RenderStepped:Connect(function()
     if not _G.SellLemonsActive then return end
 
-    local chr = player.Character
-    local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
-
-    if lemonFarmActive and hrp then
-        pcall(function()
-            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        end)
-        if currentFruit then
-            local headPos = hrp.Position + Vector3.new(0, 1.5, 0)
-            camera.lookAt(headPos, currentFruit)
+    -- Zero velocity every frame while lemon farming to prevent falling
+    if lemonFarmActive then
+        local chr = player.Character
+        local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            end)
         end
     end
 
@@ -54,7 +51,6 @@ RunService.RenderStepped:Connect(function()
             key1Down = true
             autoBuyActive = not autoBuyActive
             lemonFarmActive = false
-            currentFruit = nil
             print("Auto Buy: " .. (autoBuyActive and "ON" or "OFF"))
         end
     else
@@ -66,7 +62,6 @@ RunService.RenderStepped:Connect(function()
             key2Down = true
             lemonFarmActive = not lemonFarmActive
             autoBuyActive = false
-            if not lemonFarmActive then currentFruit = nil end
             print("Lemon Farm: " .. (lemonFarmActive and "ON" or "OFF"))
         end
     else
@@ -78,7 +73,6 @@ RunService.RenderStepped:Connect(function()
             key9Down = true
             lemonFarmActive = false
             autoBuyActive = false
-            currentFruit = nil
             print("Everything stopped!")
         end
     else
@@ -93,25 +87,17 @@ task.spawn(function()
 
         -- AUTO BUY
         if autoBuyActive and myTycoon and hrp then
-            local buttons = {}
             for _, v in pairs(myTycoon:GetDescendants()) do
-                if v.Name == "Button" and v:IsA("BasePart") then
-                    table.insert(buttons, v)
-                end
-            end
-
-            for _, v in pairs(buttons) do
                 if not autoBuyActive then break end
-                if v and v.Parent then
-                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 3, v.Position.Z)
-                    task.wait(0.05)
+                if v.Name == "Button" and v:IsA("BasePart") then
                     hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 2, v.Position.Z)
-                    task.wait(0.05)
-                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 1, v.Position.Z)
                     task.wait(0.1)
+                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 1, v.Position.Z)
+                    task.wait(0.2)
                 end
             end
-            task.wait(0.2)
+            print("Buy sweep done!")
+            task.wait(1)
 
         -- LEMON FARM
         elseif lemonFarmActive and hrp then
@@ -135,8 +121,10 @@ task.spawn(function()
 
                     local tpPos = Vector3.new(v.Position.X, v.Position.Y - 4, v.Position.Z)
                     hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
-                    currentFruit = v.Position
-                    task.wait(0.1)
+                    task.wait(0.05)
+
+                    camera.lookAt(tpPos, v.Position)
+                    task.wait(0.05)
 
                     local cx = math.floor(camera.ViewportSize.X / 2)
                     local cy = math.floor(camera.ViewportSize.Y / 2)
@@ -144,8 +132,6 @@ task.spawn(function()
                     mouse1click()
                     task.wait(0.03)
                     mouse1click()
-
-                    currentFruit = nil
 
                     for _, part in pairs(modified) do
                         pcall(function() part.CanQuery = true end)
