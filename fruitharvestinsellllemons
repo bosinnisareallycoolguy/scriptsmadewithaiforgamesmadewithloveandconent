@@ -35,7 +35,6 @@ print(myTycoon and "Tycoon found: " .. myTycoon.Name or "WARNING: Tycoon not fou
 RunService.RenderStepped:Connect(function()
     if not _G.SellLemonsActive then return end
 
-    -- Zero velocity every frame while lemon farming to prevent falling
     if lemonFarmActive then
         local chr = player.Character
         local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
@@ -87,17 +86,27 @@ task.spawn(function()
 
         -- AUTO BUY
         if autoBuyActive and myTycoon and hrp then
+            local buttons = {}
             for _, v in pairs(myTycoon:GetDescendants()) do
-                if not autoBuyActive then break end
-                if v.Name == "Button" and v:IsA("BasePart") then
-                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 2, v.Position.Z)
-                    task.wait(0.1)
-                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 1, v.Position.Z)
-                    task.wait(0.2)
+                if v and v.Parent and v.Name == "Button" and v:IsA("BasePart") then
+                    table.insert(buttons, v)
                 end
             end
-            print("Buy sweep done!")
-            task.wait(1)
+
+            for _, v in pairs(buttons) do
+                if not autoBuyActive then break end
+                pcall(function()
+                    if v and v.Parent then
+                        hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 3, v.Position.Z)
+                        task.wait(0.05)
+                        hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 2, v.Position.Z)
+                        task.wait(0.05)
+                        hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 1, v.Position.Z)
+                        task.wait(0.1)
+                    end
+                end)
+            end
+            task.wait(0.2)
 
         -- LEMON FARM
         elseif lemonFarmActive and hrp then
@@ -118,6 +127,8 @@ task.spawn(function()
                             end
                         end
                     end
+
+                    if not v or not v:IsDescendantOf(workspace) then continue end
 
                     local tpPos = Vector3.new(v.Position.X, v.Position.Y - 4, v.Position.Z)
                     hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
