@@ -127,10 +127,11 @@ task.spawn(function()
                             end
                         end
                     end
-
-                    if not v or not v:IsDescendantOf(workspace) then continue end
-
-                    local tpPos = Vector3.new(v.Position.X, v.Position.Y - 4, v.Position.Z)
+                    local TempPos = v.Position
+                    or not TempPos
+                    if not v or not v:IsDescendantOf(workspace) or not TempPos then continue end
+                    
+                    local tpPos = Vector3.new(TempPos.X, TempPos.Y - 4, TempPos.Z)
                     hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
                     task.wait(0.05)
 
