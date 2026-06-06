@@ -17,15 +17,111 @@ local key1Down = false
 local key2Down = false
 local key9Down = false
 
-local myTycoon = nil
-for _, tycoon in pairs(workspace:GetChildren()) do
-    if tycoon.Name:find("Tycoon") then
-        local owner = tycoon:FindFirstChild("Owner")
-        if owner and tostring(owner.Value):find(player.Name) then
-            myTycoon = tycoon
-            break
+-- Track buttons we've failed to buy so we skip them
+local failedButtons = {} -- [posKey] = failCount
+
+local function getTycoon()
+    for _, tycoon in pairs(workspace:GetChildren()) do
+        if tycoon.Name:find("Tycoon") then
+            local owner = tycoon:FindFirstChild("Owner")
+            if owner and tostring(owner.Value):find(player.Name) then
+                return tycoon
+            end
         end
     end
+    return nil
+end
+
+local myTycoon = getTycoon()
+
+local function posKey(pos)
+    return math.floor(pos.X + 0.5) .. "," .. math.floor(pos.Y + 0.5) .. "," .. math.floor(pos.Z + 0.5)
+end
+
+-- Helper to check if a button is greyed out/unaffordable
+local function isGreyedOut(v)
+    -- Safely read the Color property (Color3)
+    local success, color3 = pcall(function() return v.Color end)
+    if not success or not color3 then
+        return false -- Default to false (not greyed out) if we can't read it
+    end
+    
+    local c = color3
+    local diff1 = math.abs(c.R - c.G)
+    local diff2 = math.abs(c.G - c.B)
+    local diff3 = math.abs(c.R - c.B)
+    
+    -- If R, G, B are close to each other (within 30 points) and not too bright white (R < 200)
+    if diff1 < 30 and diff2 < 30 and diff3 < 30 and c.R < 200 then
+        return true
+    end
+    
+    return false
+end
+
+-- Cache to avoid calling GetDescendants() every single frame
+local cachedButtons = {}
+local lastScanTime = 0
+
+local function getButtons(tycoon)
+    local now = tick()
+    -- Re-scan only if cache is empty or 1.5 seconds have passed
+    if #cachedButtons == 0 or (now - lastScanTime) > 1.5 then
+        local buttons = {}
+        for _, v in pairs(tycoon:GetDescendants()) do
+            if v and v.Parent and v.Name == "Button" and v:IsA("BasePart") then
+                table.insert(buttons, v)
+            end
+        end
+        cachedButtons = buttons
+        lastScanTime = now
+    end
+
+    -- Return only buttons that still exist in the workspace
+    local activeButtons = {}
+    for _, btn in ipairs(cachedButtons) do
+        if btn and btn.Parent and btn:IsDescendantOf(tycoon) then
+            table.insert(activeButtons, btn)
+        end
+    end
+    return activeButtons
+end
+
+local function findBestButton(tycoon, hrp)
+    if not tycoon or not hrp then return nil end
+
+    local best = nil
+    local bestDist = math.huge
+    local buttons = getButtons(tycoon)
+
+    for _, v in ipairs(buttons) do
+        local exists = false
+        pcall(function()
+            exists = v and v.Parent and v:IsDescendantOf(tycoon)
+        end)
+        
+        if exists then
+            local key = posKey(v.Position)
+            local fails = failedButtons[key] or 0
+
+            local grey = isGreyedOut(v)
+
+            -- Skip buttons we've failed 2+ times, or if they are greyed out
+            if fails < 2 and not grey then
+                local dist = (v.Position - hrp.Position).Magnitude
+                if fails == 0 then
+                    dist = dist * 0.1 -- heavily prioritize untried buttons
+                end
+
+                if dist < bestDist then
+                    bestDist = dist
+                    best = v
+                end
+            end
+        end
+    end
+    
+    return best
 end
 
 print("=== Sell Lemons Script ===")
@@ -50,6 +146,8 @@ RunService.RenderStepped:Connect(function()
             key1Down = true
             autoBuyActive = not autoBuyActive
             lemonFarmActive = false
+            failedButtons = {} -- reset fails on toggle
+            cachedButtons = {} -- clear cache to get fresh buttons
             print("Auto Buy: " .. (autoBuyActive and "ON" or "OFF"))
         end
     else
@@ -84,34 +182,75 @@ task.spawn(function()
         local character = player.Character
         local hrp = character and character:FindFirstChild("HumanoidRootPart")
 
-        -- AUTO BUY
-        if autoBuyActive and myTycoon and hrp then
-            local buttons = {}
-            for _, v in pairs(myTycoon:GetDescendants()) do
-                if v and v.Parent and v.Name == "Button" and v:IsA("BasePart") then
-                    table.insert(buttons, v)
-                end
-            end
+        -- Re-find tycoon periodically in case reference went stale
+        if autoBuyActive and not myTycoon then
+            myTycoon = getTycoon()
+        end
 
-            for _, v in pairs(buttons) do
-                if not autoBuyActive then break end
+        -- AUTO BUY: one button at a time, re-scan after each
+        if autoBuyActive and myTycoon and hrp then
+            local button = findBestButton(myTycoon, hrp)
+
+            if button then
+                local key = posKey(button.Position)
+
                 pcall(function()
-                    if v and v.Parent then
-                        hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 3, v.Position.Z)
-                        task.wait(0.05)
-                        hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 2, v.Position.Z)
-                        task.wait(0.05)
-                        hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 1, v.Position.Z)
-                        task.wait(0.1)
+                    if button and button.Parent and button:IsDescendantOf(myTycoon) then
+                        local colorStr = "Unknown"
+                        pcall(function() 
+                            colorStr = string.format("RGB(%.0f, %.0f, %.0f)", button.Color.R, button.Color.G, button.Color.B) 
+                        end)
+                        print("Buying: " .. button.Name .. " | Color: " .. colorStr)
+                        
+                        -- Two-step teleport drop to ensure Roblox physics registers the Touch event
+                        hrp.CFrame = CFrame.new(button.Position.X, button.Position.Y + 3.0, button.Position.Z)
+                        task.wait(0.04)
+                        hrp.CFrame = CFrame.new(button.Position.X, button.Position.Y + 1.0, button.Position.Z)
+                        task.wait(0.04)
                     end
                 end)
+
+                -- Check if the button was bought (it should be gone)
+                task.wait(0.04)
+                local stillExists = false
+                pcall(function()
+                    stillExists = button and button.Parent and button:IsDescendantOf(myTycoon)
+                end)
+
+                if stillExists then
+                    -- Button didn't get bought — probably can't afford it
+                    failedButtons[key] = (failedButtons[key] or 0) + 1
+                else
+                    -- Button was successfully bought!
+                    failedButtons[key] = nil
+                    
+                    -- Safe decay of existing fails
+                    local updatedFails = {}
+                    for k, v in pairs(failedButtons) do
+                        updatedFails[k] = math.max(0, v - 1)
+                    end
+                    failedButtons = updatedFails
+                end
+            else
+                -- No buyable buttons found
+                failedButtons = {}
+                myTycoon = getTycoon()
+                task.wait(0.2)
             end
-            task.wait(0.2)
+
+            task.wait(0.02)
 
         -- LEMON FARM
         elseif lemonFarmActive and hrp then
+            local count = 0
             for _, v in pairs(workspace:GetDescendants()) do
                 if not lemonFarmActive then break end
+                
+                count = count + 1
+                if count % 200 == 0 then
+                    task.wait()
+                end
+
                 if v.Name == "ClickPart" then
                     local fruit = v.Parent
                     local tree = fruit and fruit.Parent
@@ -158,4 +297,5 @@ task.spawn(function()
             task.wait(0.1)
         end
     end
+end)
 end)
