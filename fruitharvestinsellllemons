@@ -41,7 +41,7 @@ RunService.RenderStepped:Connect(function()
         local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
         if hrp then
             pcall(function()
-                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 2, 0)
             end)
         end
     end
