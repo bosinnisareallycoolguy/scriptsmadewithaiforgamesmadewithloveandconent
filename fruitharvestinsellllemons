@@ -5,16 +5,19 @@ local player = Players.LocalPlayer
 
 setrobloxinput(true)
 
+if _G.SellLemonsActive then
+    _G.SellLemonsActive = false
+    task.wait(0.2)
+end
+_G.SellLemonsActive = true
+
 local lemonFarmActive = false
 local autoBuyActive = false
-local lockFrom = nil
-local lockTarget = nil
-
+local currentFruit = nil
 local key1Down = false
 local key2Down = false
 local key9Down = false
 
--- Find tycoon
 local myTycoon = nil
 for _, tycoon in pairs(workspace:GetChildren()) do
     if tycoon.Name:find("Tycoon") then
@@ -28,82 +31,87 @@ end
 
 print("=== Sell Lemons Script ===")
 print("1 = Toggle Auto Buy | 2 = Toggle Lemon Farm | 9 = Stop All")
-if myTycoon then
-    print("Tycoon found: " .. myTycoon.Name)
-else
-    print("WARNING: Tycoon not found!")
-end
+print(myTycoon and "Tycoon found: " .. myTycoon.Name or "WARNING: Tycoon not found!")
 
 RunService.RenderStepped:Connect(function()
-    -- Key 1 (keycode 49) = toggle auto buy
+    if not _G.SellLemonsActive then return end
+
+    local chr = player.Character
+    local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
+
+    if lemonFarmActive and hrp then
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        end)
+        if currentFruit then
+            local headPos = hrp.Position + Vector3.new(0, 1.5, 0)
+            camera.lookAt(headPos, currentFruit)
+        end
+    end
+
     if iskeypressed(49) then
         if not key1Down then
             key1Down = true
             autoBuyActive = not autoBuyActive
             lemonFarmActive = false
-            lockFrom = nil
-            lockTarget = nil
+            currentFruit = nil
             print("Auto Buy: " .. (autoBuyActive and "ON" or "OFF"))
         end
     else
         key1Down = false
     end
 
-    -- Key 2 (keycode 50) = toggle lemon farm
     if iskeypressed(50) then
         if not key2Down then
             key2Down = true
             lemonFarmActive = not lemonFarmActive
             autoBuyActive = false
-            lockFrom = nil
-            lockTarget = nil
+            if not lemonFarmActive then currentFruit = nil end
             print("Lemon Farm: " .. (lemonFarmActive and "ON" or "OFF"))
         end
     else
         key2Down = false
     end
 
-    -- Key 9 (keycode 57) = stop all
     if iskeypressed(57) then
         if not key9Down then
             key9Down = true
             lemonFarmActive = false
             autoBuyActive = false
-            lockFrom = nil
-            lockTarget = nil
+            currentFruit = nil
             print("Everything stopped!")
         end
     else
         key9Down = false
     end
-
-    -- Camera lock for lemon farm
-    if lockFrom and lockTarget then
-        camera.CFrame = CFrame.lookAt(lockFrom, lockTarget)
-    end
 end)
 
--- Main loop
 task.spawn(function()
-    while true do
+    while _G.SellLemonsActive do
         local character = player.Character
         local hrp = character and character:FindFirstChild("HumanoidRootPart")
 
         -- AUTO BUY
         if autoBuyActive and myTycoon and hrp then
+            local buttons = {}
             for _, v in pairs(myTycoon:GetDescendants()) do
-                if not autoBuyActive then break end
                 if v.Name == "Button" and v:IsA("BasePart") then
-                    -- Teleport above button first
-                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 2, v.Position.Z)
-                    task.wait(0.1)
-                    -- Teleport lower to guarantee touch
-                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 1, v.Position.Z)
-                    task.wait(0.2)
+                    table.insert(buttons, v)
                 end
             end
-            print("Buy sweep done!")
-            task.wait(1)
+
+            for _, v in pairs(buttons) do
+                if not autoBuyActive then break end
+                if v and v.Parent then
+                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 3, v.Position.Z)
+                    task.wait(0.05)
+                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 2, v.Position.Z)
+                    task.wait(0.05)
+                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 1, v.Position.Z)
+                    task.wait(0.1)
+                end
+            end
+            task.wait(0.2)
 
         -- LEMON FARM
         elseif lemonFarmActive and hrp then
@@ -113,7 +121,6 @@ task.spawn(function()
                     local fruit = v.Parent
                     local tree = fruit and fruit.Parent
 
-                    -- Disable canopy blocking
                     local modified = {}
                     if tree then
                         for _, part in pairs(tree:GetDescendants()) do
@@ -126,24 +133,20 @@ task.spawn(function()
                         end
                     end
 
-                    -- Teleport below fruit
-                    local tpPos = Vector3.new(v.Position.X, v.Position.Y - 8, v.Position.Z)
+                    local tpPos = Vector3.new(v.Position.X, v.Position.Y - 4, v.Position.Z)
                     hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
-                    lockFrom = tpPos
-                    lockTarget = v.Position
+                    currentFruit = v.Position
                     task.wait(0.1)
 
-                    -- Click center of screen
-                    local center = camera.ViewportSize / 2
-                    mousemoveabs(center.X, center.Y)
+                    local cx = math.floor(camera.ViewportSize.X / 2)
+                    local cy = math.floor(camera.ViewportSize.Y / 2)
+                    mousemoveabs(cx, cy)
                     mouse1click()
                     task.wait(0.03)
                     mouse1click()
 
-                    lockFrom = nil
-                    lockTarget = nil
+                    currentFruit = nil
 
-                    -- Restore canopy
                     for _, part in pairs(modified) do
                         pcall(function() part.CanQuery = true end)
                     end
