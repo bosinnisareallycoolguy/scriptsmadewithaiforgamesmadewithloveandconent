@@ -40,7 +40,9 @@ RunService.RenderStepped:Connect(function()
         if not key1Down then
             key1Down = true
             autoBuyActive = not autoBuyActive
-            lemonFarmActive = false -- stop lemon farm when auto buy starts
+            lemonFarmActive = false
+            lockFrom = nil
+            lockTarget = nil
             print("Auto Buy: " .. (autoBuyActive and "ON" or "OFF"))
         end
     else
@@ -52,7 +54,9 @@ RunService.RenderStepped:Connect(function()
         if not key2Down then
             key2Down = true
             lemonFarmActive = not lemonFarmActive
-            autoBuyActive = false -- stop auto buy when lemon farm starts
+            autoBuyActive = false
+            lockFrom = nil
+            lockTarget = nil
             print("Lemon Farm: " .. (lemonFarmActive and "ON" or "OFF"))
         end
     else
@@ -73,12 +77,13 @@ RunService.RenderStepped:Connect(function()
         key9Down = false
     end
 
+    -- Camera lock for lemon farm
     if lockFrom and lockTarget then
         camera.CFrame = CFrame.lookAt(lockFrom, lockTarget)
     end
 end)
 
--- Single main loop - runs one mode at a time
+-- Main loop
 task.spawn(function()
     while true do
         local character = player.Character
@@ -89,7 +94,11 @@ task.spawn(function()
             for _, v in pairs(myTycoon:GetDescendants()) do
                 if not autoBuyActive then break end
                 if v.Name == "Button" and v:IsA("BasePart") then
-                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 3, v.Position.Z)
+                    -- Teleport above button first
+                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 2, v.Position.Z)
+                    task.wait(0.1)
+                    -- Teleport lower to guarantee touch
+                    hrp.CFrame = CFrame.new(v.Position.X, v.Position.Y + 1, v.Position.Z)
                     task.wait(0.2)
                 end
             end
@@ -104,6 +113,7 @@ task.spawn(function()
                     local fruit = v.Parent
                     local tree = fruit and fruit.Parent
 
+                    -- Disable canopy blocking
                     local modified = {}
                     if tree then
                         for _, part in pairs(tree:GetDescendants()) do
@@ -116,12 +126,14 @@ task.spawn(function()
                         end
                     end
 
+                    -- Teleport below fruit
                     local tpPos = Vector3.new(v.Position.X, v.Position.Y - 8, v.Position.Z)
                     hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
                     lockFrom = tpPos
                     lockTarget = v.Position
                     task.wait(0.1)
 
+                    -- Click center of screen
                     local center = camera.ViewportSize / 2
                     mousemoveabs(center.X, center.Y)
                     mouse1click()
@@ -131,6 +143,7 @@ task.spawn(function()
                     lockFrom = nil
                     lockTarget = nil
 
+                    -- Restore canopy
                     for _, part in pairs(modified) do
                         pcall(function() part.CanQuery = true end)
                     end
