@@ -5,7 +5,6 @@ local player = Players.LocalPlayer
 
 setrobloxinput(true)
 
--- Cleanup any existing connection to prevent duplicate execution
 if _G.SellLemonsConnection then
     pcall(function() _G.SellLemonsConnection:Disconnect() end)
     _G.SellLemonsConnection = nil
@@ -17,31 +16,18 @@ if _G.SellLemonsActive then
 end
 _G.SellLemonsActive = true
 
--- Named key codes for readability
 local KEYS = { AUTOBUY = 49, LEMON = 50, STOP = 57 }
-
--- Single mode variable instead of two booleans (they were mutually exclusive anyway)
-local activeMode = "none" -- "none" | "buy" | "farm"
+local activeMode = "none"
 
 local key1Down = false
 local key2Down = false
 local key9Down = false
 
-local failedButtons = {} -- [posKey] = {tries = number, lastTry = tick()}
-
--- Button cache
 local cachedButtons = {}
 local lastScanTime = 0
 local needsRescan = true
-
--- ClickPart cache for lemon farm
-local cachedClickParts = {}
-local lastClickScan = 0
-
--- Container cache
 local buttonsContainer = nil
 local lastContainerScan = 0
-
 local myTycoon = nil
 
 -- ─────────────────────────────────────────────
@@ -63,10 +49,6 @@ local function getTycoon()
         end
     end
     return nil
-end
-
-local function posKey(pos)
-    return math.floor(pos.X + 0.5) .. "," .. math.floor(pos.Y + 0.5) .. "," .. math.floor(pos.Z + 0.5)
 end
 
 local function normalizeColor(c)
@@ -94,7 +76,7 @@ local function getButtonsContainer(tycoon)
     end
 
     local now = tick()
-    if (now - lastContainerScan) < 3.0 then return tycoon end
+    if (now - lastContainerScan) < 1.0 then return tycoon end
     lastContainerScan = now
 
     for _, child in ipairs(tycoon:GetChildren()) do
@@ -102,7 +84,6 @@ local function getButtonsContainer(tycoon)
             local name = child.Name:lower()
             if name:find("button") or name:find("purchase") or name:find("buy") then
                 buttonsContainer = child
-                print("[Debug] Buttons container (by name): " .. child:GetFullName())
                 return child
             end
         end
@@ -116,7 +97,6 @@ local function getButtonsContainer(tycoon)
             end
             if ancestor and ancestor ~= tycoon then
                 buttonsContainer = ancestor
-                print("[Debug] Buttons container (by button): " .. ancestor:GetFullName())
                 return ancestor
             end
         end
@@ -133,7 +113,7 @@ local function getButtons(tycoon)
     local now = tick()
     local shouldScan = needsRescan
         or ((#cachedButtons == 0) and (now - lastScanTime) > 1.0)
-        or ((now - lastScanTime) > 5.0)
+        or ((now - lastScanTime) > 1.0)
 
     if shouldScan then
         needsRescan = false
@@ -152,74 +132,16 @@ local function getButtons(tycoon)
     end
 
     local activeButtons = {}
-    local activeKeys = {}
     for _, btn in ipairs(cachedButtons) do
         if btn and btn.Parent and btn:IsDescendantOf(tycoon) then
             table.insert(activeButtons, btn)
-            activeKeys[posKey(btn.Position)] = true
-        end
-    end
-
-    -- Only clean up failedButtons when rescanning (avoids iterating every frame)
-    if needsRescan then
-        for k in pairs(failedButtons) do
-            if not activeKeys[k] then failedButtons[k] = nil end
         end
     end
 
     return activeButtons
 end
 
-local function getCooldownRemaining(key)
-    local data = failedButtons[key]
-    if not data then return 0 end
-    local elapsed = tick() - data.lastTry
-    local limit = (data.tries >= 2) and 4.0 or 0.3
-    return limit - elapsed
-end
-
-local function findBestButton(tycoon, hrp)
-    if not tycoon or not hrp then return nil end
-
-    local best, bestDist = nil, math.huge
-    for _, v in ipairs(getButtons(tycoon)) do
-        local exists = false
-        safeCall(function() exists = v and v.Parent and v:IsDescendantOf(tycoon) end)
-
-        if exists and getCooldownRemaining(posKey(v.Position)) <= 0 and not isGreyedOut(v) then
-            local dist = (v.Position - hrp.Position).Magnitude
-            if dist < bestDist then
-                bestDist = dist
-                best = v
-            end
-        end
-    end
-    return best
-end
-
--- ─────────────────────────────────────────────
--- ClickPart cache (lemon farm)
--- ─────────────────────────────────────────────
-
-local function getClickParts()
-    if tick() - lastClickScan > 5 then
-        cachedClickParts = {}
-        for _, v in pairs(workspace:GetDescendants()) do
-            if v.Name == "ClickPart" then
-                table.insert(cachedClickParts, v)
-            end
-        end
-        lastClickScan = tick()
-    end
-    return cachedClickParts
-end
-
--- ─────────────────────────────────────────────
--- Reset helpers
--- ─────────────────────────────────────────────
-
 local function resetBuyState()
-    failedButtons = {}
     cachedButtons = {}
     buttonsContainer = nil
     lastContainerScan = 0
@@ -234,8 +156,6 @@ myTycoon = getTycoon()
 print("=== Sell Lemons Script ===")
 print("1 = Toggle Auto Buy | 2 = Toggle Lemon Farm | 9 = Stop All")
 print(myTycoon and "Tycoon found: " .. myTycoon.Name or "WARNING: Tycoon not found!")
-print("credits, @asiunas101 with nearly the entire script,@poloski for making a atc good auto buy, and @ice_of_death for bug fixing")
-
 
 -- ─────────────────────────────────────────────
 -- Input handling (RenderStepped)
@@ -244,7 +164,6 @@ print("credits, @asiunas101 with nearly the entire script,@poloski for making a 
 _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
     if not _G.SellLemonsActive then return end
 
-    -- Lemon farm jump boost
     if activeMode == "farm" then
         local chr = player.Character
         local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
@@ -253,13 +172,13 @@ _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- Key 1: Toggle Auto Buy
+    -- KEY 1: Toggle Auto Buy (also cancels Lemon Farm)
     if iskeypressed(KEYS.AUTOBUY) then
         if not key1Down then
             key1Down = true
-            if activeMode == "buy" then
+            if activeMode ~= "none" then
                 activeMode = "none"
-                print("Auto Buy: OFF")
+                print("Auto Buy: OFF / All stopped")
             else
                 activeMode = "buy"
                 resetBuyState()
@@ -270,13 +189,13 @@ _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
         key1Down = false
     end
 
-    -- Key 2: Toggle Lemon Farm
+    -- KEY 2: Toggle Lemon Farm (also cancels Auto Buy)
     if iskeypressed(KEYS.LEMON) then
         if not key2Down then
             key2Down = true
-            if activeMode == "farm" then
+            if activeMode ~= "none" then
                 activeMode = "none"
-                print("Lemon Farm: OFF")
+                print("Lemon Farm: OFF / All stopped")
             else
                 activeMode = "farm"
                 print("Lemon Farm: ON")
@@ -286,7 +205,7 @@ _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
         key2Down = false
     end
 
-    -- Key 9: Stop All
+    -- KEY 9: Stop everything
     if iskeypressed(KEYS.STOP) then
         if not key9Down then
             key9Down = true
@@ -307,7 +226,6 @@ task.spawn(function()
         local character = player.Character
         local hrp = character and character:FindFirstChild("HumanoidRootPart")
 
-        -- Re-find tycoon if stale
         if not myTycoon then
             myTycoon = getTycoon()
             if myTycoon then
@@ -326,14 +244,13 @@ task.spawn(function()
 
                 local exists = button and button.Parent and button:IsDescendantOf(myTycoon)
                 if not exists then continue end
-
                 if isGreyedOut(button) then continue end
 
                 anyBuyable = true
 
                 safeCall(function()
-                    hrp.CFrame = CFrame.new(button.Position.X, button.Position.Y, button.Position.Z)
                     if firetouchinterest then
+                        hrp.CFrame = CFrame.new(button.Position.X, button.Position.Y, button.Position.Z)
                         firetouchinterest(button, hrp, 0)
                         task.wait(0.02)
                         firetouchinterest(button, hrp, 1)
@@ -351,7 +268,10 @@ task.spawn(function()
             needsRescan = true
 
             if not anyBuyable then
-                task.wait(0.1)
+                task.wait(0.5)
+                resetBuyState()
+            else
+                task.wait(0.05)
             end
 
         -- ── LEMON FARM ────────────────────────────
