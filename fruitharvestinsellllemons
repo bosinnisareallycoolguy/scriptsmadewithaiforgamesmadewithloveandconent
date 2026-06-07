@@ -18,6 +18,7 @@ _G.SellLemonsActive = true
 
 local KEYS = { AUTOBUY = 49, LEMON = 50, STOP = 57 }
 local activeMode = "none"
+local currentFruit = nil
 
 local key1Down = false
 local key2Down = false
@@ -29,10 +30,6 @@ local needsRescan = true
 local buttonsContainer = nil
 local lastContainerScan = 0
 local myTycoon = nil
-
--- ─────────────────────────────────────────────
--- Helpers
--- ─────────────────────────────────────────────
 
 local function safeCall(fn)
     local ok, err = pcall(fn)
@@ -66,19 +63,13 @@ local function isGreyedOut(v)
     return math.abs(r - g) < 30 and math.abs(g - b) < 30 and math.abs(r - b) < 30 and r < 200
 end
 
--- ─────────────────────────────────────────────
--- Button container detection
--- ─────────────────────────────────────────────
-
 local function getButtonsContainer(tycoon)
     if buttonsContainer and buttonsContainer:IsDescendantOf(tycoon) then
         return buttonsContainer
     end
-
     local now = tick()
     if (now - lastContainerScan) < 1.0 then return tycoon end
     lastContainerScan = now
-
     for _, child in ipairs(tycoon:GetChildren()) do
         if child:IsA("Folder") or child:IsA("Model") then
             local name = child.Name:lower()
@@ -88,7 +79,6 @@ local function getButtonsContainer(tycoon)
             end
         end
     end
-
     for _, v in pairs(tycoon:GetDescendants()) do
         if v.Name == "Button" and v:IsA("BasePart") then
             local ancestor = v.Parent
@@ -101,28 +91,20 @@ local function getButtonsContainer(tycoon)
             end
         end
     end
-
     return tycoon
 end
-
--- ─────────────────────────────────────────────
--- Button cache
--- ─────────────────────────────────────────────
 
 local function getButtons(tycoon)
     local now = tick()
     local shouldScan = needsRescan
         or ((#cachedButtons == 0) and (now - lastScanTime) > 1.0)
         or ((now - lastScanTime) > 1.0)
-
     if shouldScan then
         needsRescan = false
         lastScanTime = now
-
         local container = getButtonsContainer(tycoon)
         local buttons = {}
         local searchList = (container == tycoon) and container:GetChildren() or container:GetDescendants()
-
         for _, v in pairs(searchList) do
             if v and v.Parent and v.Name == "Button" and v:IsA("BasePart") then
                 table.insert(buttons, v)
@@ -130,14 +112,12 @@ local function getButtons(tycoon)
         end
         cachedButtons = buttons
     end
-
     local activeButtons = {}
     for _, btn in ipairs(cachedButtons) do
         if btn and btn.Parent and btn:IsDescendantOf(tycoon) then
             table.insert(activeButtons, btn)
         end
     end
-
     return activeButtons
 end
 
@@ -148,18 +128,10 @@ local function resetBuyState()
     needsRescan = true
 end
 
--- ─────────────────────────────────────────────
--- Startup
--- ─────────────────────────────────────────────
-
 myTycoon = getTycoon()
 print("=== Sell Lemons Script ===")
 print("1 = Toggle Auto Buy | 2 = Toggle Lemon Farm | 9 = Stop All")
 print(myTycoon and "Tycoon found: " .. myTycoon.Name or "WARNING: Tycoon not found!")
-
--- ─────────────────────────────────────────────
--- Input handling (RenderStepped)
--- ─────────────────────────────────────────────
 
 _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
     if not _G.SellLemonsActive then return end
@@ -169,54 +141,56 @@ _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
         local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
         if hrp then
             safeCall(function() hrp.AssemblyLinearVelocity = Vector3.new(0, 2, 0) end)
+            if currentFruit then
+                local headPos = hrp.Position + Vector3.new(0, 1.5, 0)
+                camera.lookAt(headPos, currentFruit)
+            end
         end
     end
 
-    if iskeypressed(KEYS.AUTOBUY) then
-        if not key1Down then
-            key1Down = true
-            if activeMode == "buy" then
-                activeMode = "none"
-                print("Auto Buy: OFF")
-            else
-                activeMode = "buy"
-                resetBuyState()
-                print("Auto Buy: ON")
-            end
+    -- Key 1 toggle auto buy
+    local k1 = iskeypressed(KEYS.AUTOBUY)
+    if k1 and not key1Down then
+        key1Down = true
+        if activeMode == "buy" then
+            activeMode = "none"
+            print("Auto Buy: OFF")
+        else
+            activeMode = "buy"
+            resetBuyState()
+            print("Auto Buy: ON")
         end
-    else
+    elseif not k1 then
         key1Down = false
     end
 
-    if iskeypressed(KEYS.LEMON) then
-        if not key2Down then
-            key2Down = true
-            if activeMode == "farm" then
-                activeMode = "none"
-                print("Lemon Farm: OFF")
-            else
-                activeMode = "farm"
-                print("Lemon Farm: ON")
-            end
+    -- Key 2 toggle lemon farm
+    local k2 = iskeypressed(KEYS.LEMON)
+    if k2 and not key2Down then
+        key2Down = true
+        if activeMode == "farm" then
+            activeMode = "none"
+            currentFruit = nil
+            print("Lemon Farm: OFF")
+        else
+            activeMode = "farm"
+            print("Lemon Farm: ON")
         end
-    else
+    elseif not k2 then
         key2Down = false
     end
 
-    if iskeypressed(KEYS.STOP) then
-        if not key9Down then
-            key9Down = true
-            activeMode = "none"
-            print("Everything stopped!")
-        end
-    else
+    -- Key 9 stop all
+    local k9 = iskeypressed(KEYS.STOP)
+    if k9 and not key9Down then
+        key9Down = true
+        activeMode = "none"
+        currentFruit = nil
+        print("Everything stopped!")
+    elseif not k9 then
         key9Down = false
     end
 end)
-
--- ─────────────────────────────────────────────
--- Main loop
--- ─────────────────────────────────────────────
 
 task.spawn(function()
     while _G.SellLemonsActive do
@@ -231,14 +205,13 @@ task.spawn(function()
             end
         end
 
-        -- ── AUTO BUY ──────────────────────────────
+        -- AUTO BUY
         if activeMode == "buy" and myTycoon and hrp then
             local buttons = getButtons(myTycoon)
             local anyBuyable = false
 
             for _, button in ipairs(buttons) do
                 if activeMode ~= "buy" then break end
-
                 local exists = button and button.Parent and button:IsDescendantOf(myTycoon)
                 if not exists then continue end
                 if isGreyedOut(button) then continue end
@@ -271,16 +244,13 @@ task.spawn(function()
                 task.wait(0.05)
             end
 
-        -- ── LEMON FARM ────────────────────────────
+        -- LEMON FARM
         elseif activeMode == "farm" and hrp then
             local count = 0
             for _, v in pairs(workspace:GetDescendants()) do
                 if activeMode ~= "farm" then break end
-
                 count = count + 1
-                if count % 200 == 0 then
-                    task.wait()
-                end
+                if count % 200 == 0 then task.wait() end
 
                 if v.Name == "ClickPart" then
                     local fruit = v.Parent
@@ -302,27 +272,26 @@ task.spawn(function()
 
                     local tpPos = Vector3.new(v.Position.X, v.Position.Y - 4, v.Position.Z)
                     hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
-                    task.wait(0.05)
-
-                    camera.CFrame = CFrame.lookAt(tpPos, v.Position)
-                    task.wait(0.05)
+                    currentFruit = v.Position
 
                     local cx = math.floor(camera.ViewportSize.X / 2)
                     local cy = math.floor(camera.ViewportSize.Y / 2)
                     mousemoveabs(cx, cy)
-                    mouse1click()
-                    task.wait(0.03)
-                    mouse1click()
+
+                    local deadline = tick() + 0.15
+                    while tick() < deadline and v and v:IsDescendantOf(workspace) do
+                        if activeMode ~= "farm" then break end
+                        mouse1click()
+                        task.wait(0.04)
+                    end
 
                     for _, part in pairs(modified) do
                         pcall(function() part.CanQuery = true end)
                     end
-
-                    task.wait(0.03)
                 end
             end
             print("Lemon sweep done!")
-            task.wait(0.5)
+            task.wait(0.1)
 
         else
             task.wait(0.1)
