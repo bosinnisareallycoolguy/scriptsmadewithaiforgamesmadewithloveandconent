@@ -234,6 +234,8 @@ myTycoon = getTycoon()
 print("=== Sell Lemons Script ===")
 print("1 = Toggle Auto Buy | 2 = Toggle Lemon Farm | 9 = Stop All")
 print(myTycoon and "Tycoon found: " .. myTycoon.Name or "WARNING: Tycoon not found!")
+print("credits, @asiunas101 with nearly the entire script,@poloski for making a atc good auto buy, and @ice_of_death for bug fixing")
+
 
 -- ─────────────────────────────────────────────
 -- Input handling (RenderStepped)
