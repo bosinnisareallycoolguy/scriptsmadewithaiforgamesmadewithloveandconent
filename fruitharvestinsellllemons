@@ -172,13 +172,12 @@ _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- KEY 1: Toggle Auto Buy (also cancels Lemon Farm)
     if iskeypressed(KEYS.AUTOBUY) then
         if not key1Down then
             key1Down = true
-            if activeMode ~= "none" then
+            if activeMode == "buy" then
                 activeMode = "none"
-                print("Auto Buy: OFF / All stopped")
+                print("Auto Buy: OFF")
             else
                 activeMode = "buy"
                 resetBuyState()
@@ -189,13 +188,12 @@ _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
         key1Down = false
     end
 
-    -- KEY 2: Toggle Lemon Farm (also cancels Auto Buy)
     if iskeypressed(KEYS.LEMON) then
         if not key2Down then
             key2Down = true
-            if activeMode ~= "none" then
+            if activeMode == "farm" then
                 activeMode = "none"
-                print("Lemon Farm: OFF / All stopped")
+                print("Lemon Farm: OFF")
             else
                 activeMode = "farm"
                 print("Lemon Farm: ON")
@@ -205,7 +203,6 @@ _G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
         key2Down = false
     end
 
-    -- KEY 9: Stop everything
     if iskeypressed(KEYS.STOP) then
         if not key9Down then
             key9Down = true
