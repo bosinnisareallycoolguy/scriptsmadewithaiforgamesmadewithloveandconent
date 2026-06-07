@@ -1,53 +1,173 @@
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local camera = workspace.CurrentCamera
-local player = Players.LocalPlayer
+-- [[ COMBINED HUB v5.9 - BURST MODE (Distance-Sorted Queue + Reactive Refill) ]] --
+if _G.MatchaCleanup then pcall(_G.MatchaCleanup) end
+local ScriptActive = true
+
+-- ==================== LOCAL CACHE (hot paths) ====================
+local mfloor, mabs            = math.floor, math.abs
+local tinsert                 = table.insert
+local ipairs_, pairs_         = ipairs, pairs
+local tostring_, tonumber_    = tostring, tonumber
+local pcall_                  = pcall
+local task_wait, task_spawn   = task.wait, task.spawn
+local tick_                   = tick
+local sformat                 = string.format
+local Vec2, Vec3              = Vector2.new, Vector3.new
+local CF                      = CFrame.new
+local C3rgb                   = Color3.fromRGB
+
+
+-- ==================== TUNING (v5.9 BURST MODE) ====================
+-- Ajustá estos valores si ves compras fallidas o necesitás más velocidad.
+local BUTTON_RESCAN_INTERVAL  = 0.75   -- intervalo de full rescan (GetDescendants)
+local COORD_WAIT              = 0.15   -- cadencia del coordinator
+local WORKER_IDLE_WAIT        = 0.02   -- wait del worker cuando no hay items
+local TP_WAIT_1               = 0.02   -- espera entre TP arriba y TP abajo
+local TP_WAIT_2               = 0.02   -- espera después del TP abajo
+local BUY_SETTLE              = 0.03   -- espera para que server procese el touch
+local COORD_REFILL_THRESHOLD  = 5      -- coord force-rescan cuando remaining < N
+local WORKER_REFILL_THRESHOLD = 3      -- worker force-rescan cuando remaining <= N
+local EMPTY_STREAK_TRIGGER    = 2      -- (v5.9) recovery casi instantáneo (era 5)
+local CLEANUP_EVERY_N_BOUGHT  = 30     -- cleanup de cola cada N compras
+local FORCE_RESCAN_MIN_GAP    = 0.25   -- (v5.9) throttle coord (era 0.5)
+local LOG_BOUGHT_EVERY        = 10     -- print BOUGHT solo cada N compras
+local SORT_QUEUE_BY_DISTANCE  = true   -- (v5.9) bursts naturales por clusters cercanos
+
+-- ==================== INIT ====================
+local Players, RunService, Workspace, player, camera
+local initAttempts = 0
+while not player and initAttempts < 50 do
+    initAttempts = initAttempts + 1
+    pcall_(function()
+        Players    = game:GetService("Players")
+        RunService = game:GetService("RunService")
+        Workspace  = game:GetService("Workspace")
+        player     = Players.LocalPlayer
+        if player then camera = Workspace.CurrentCamera end
+    end)
+    if not player then task_wait(0.1) end
+end
+if not player then warn("[Hub] No LocalPlayer"); return end
+if not camera then camera = Workspace.CurrentCamera end
 
 setrobloxinput(true)
 
-if _G.SellLemonsConnection then
-    pcall(function() _G.SellLemonsConnection:Disconnect() end)
-    _G.SellLemonsConnection = nil
+-- Cache del mouse (evita GetMouse() por frame)
+local mouse = nil
+pcall_(function() mouse = player:GetMouse() end)
+
+local autoBuyActive   = false
+local lemonFarmActive = false
+local cashFarmActive  = false
+local key9Down        = false
+
+local function getButtonKey(v)
+    if not v then return nil end
+    local pos = v.Position
+    if not pos then return nil end
+    return mfloor(pos.X + 0.5) .. "," .. mfloor(pos.Y + 0.5) .. "," .. mfloor(pos.Z + 0.5)
 end
 
-if _G.SellLemonsActive then
-    _G.SellLemonsActive = false
-    task.wait(0.2)
-end
-_G.SellLemonsActive = true
-
-local KEYS = { AUTOBUY = 49, LEMON = 50, STOP = 57 }
-local activeMode = "none"
-local currentFruit = nil
-
-local key1Down = false
-local key2Down = false
-local key9Down = false
-
-local cachedButtons = {}
-local lastScanTime = 0
-local needsRescan = true
-local buttonsContainer = nil
-local lastContainerScan = 0
 local myTycoon = nil
-
-local function safeCall(fn)
-    local ok, err = pcall(fn)
-    if not ok then warn("[SellLemons] " .. tostring(err)) end
-end
-
-local function getTycoon()
-    for _, tycoon in pairs(workspace:GetChildren()) do
+local function findMyTycoon()
+    local pname = player.Name
+    for _, tycoon in ipairs_(Workspace:GetChildren()) do
         if tycoon.Name:find("Tycoon") then
             local owner = tycoon:FindFirstChild("Owner")
-            if owner and tostring(owner.Value):find(player.Name) then
-                return tycoon
+            if owner then
+                local ownerValue = nil
+                pcall_(function() ownerValue = tostring_(owner.Value) end)
+                if ownerValue and ownerValue:find(pname) then return tycoon end
             end
         end
     end
     return nil
 end
+myTycoon = findMyTycoon()
 
+print("=== Combined Hub v5.9 BURST MODE ===")
+
+-- ==================== UI ====================
+local drawObjs = {}
+local SysFont  = Drawing.Fonts.System
+
+local function D(typ, props)
+    local obj = Drawing.new(typ)
+    for k, v in pairs_(props) do obj[k] = v end
+    tinsert(drawObjs, obj)
+    return obj
+end
+
+local uiPos   = Vec2(150, 120)
+local uiSize  = Vec2(330, 230)
+local dragging, dragOff = false, Vec2(0, 0)
+local lastM1  = false
+
+-- Colores cacheados (se reusan cada frame en Render)
+local COL_SHADOW   = C3rgb(0, 0, 0)
+local COL_MAIN     = C3rgb(12, 12, 16)
+local COL_TOP      = C3rgb(22, 22, 28)
+local COL_ACCENT   = C3rgb(160, 0, 240)
+local COL_LBL_OFF  = C3rgb(190, 190, 195)
+local COL_LBL_ON   = C3rgb(120, 255, 120)
+local COL_LBL_ACT  = C3rgb(255, 200, 80)
+local COL_STATUS   = C3rgb(70, 70, 80)
+
+local Shadow   = D("Square", {Size = Vec2(uiSize.X + 6, uiSize.Y + 6), Color = COL_SHADOW, Transparency = 0.35, Filled = true, Visible = true})
+local MainBG   = D("Square", {Size = uiSize, Color = COL_MAIN, Filled = true, Visible = true})
+local TopBar   = D("Square", {Size = Vec2(uiSize.X, 30), Color = COL_TOP, Filled = true, Visible = true})
+local AccLine  = D("Square", {Size = Vec2(uiSize.X, 2), Color = COL_ACCENT, Filled = true, Visible = true})
+local TitleTxt = D("Text",   {Text = "MATCHA // COMBINED HUB v5.9", Size = 14, Color = COL_ACCENT, Outline = true, Visible = true, Font = SysFont})
+
+local MAXS = 5
+local SLabel, SCheck, SFill = {}, {}, {}
+for i = 1, MAXS do
+    SLabel[i] = D("Text",   {Text = "", Size = 13, Color = COL_LBL_OFF, Outline = true, Visible = false, Font = SysFont})
+    SCheck[i] = D("Circle", {Radius = 6, Thickness = 2, Color = COL_ACCENT, Filled = false, Visible = false})
+    SFill[i]  = D("Circle", {Radius = 3, Color = COL_ACCENT, Filled = true, Visible = false})
+end
+local StatusTxt = D("Text", {Text = "", Size = 11, Color = COL_STATUS, Outline = true, Visible = true, Font = SysFont})
+
+local F = {}
+local function feat(key, label, kind)
+    local f = {key = key, label = label, kind = kind, value = false}
+    tinsert(F, f)
+    return f
+end
+feat("AutoBuy",   "AUTO BUY",   "toggle")
+feat("LemonFarm", "LEMON FARM", "toggle")
+feat("CashFarm",  "CASH FARM",  "toggle")
+feat("StopAll",   "STOP ALL",   "action")
+
+local FCOUNT = #F
+
+local function syncFromUI()
+    for i = 1, FCOUNT do
+        local f = F[i]
+        local k = f.key
+        if     k == "AutoBuy"   then autoBuyActive   = f.value
+        elseif k == "LemonFarm" then lemonFarmActive = f.value
+        elseif k == "CashFarm"  then cashFarmActive  = f.value
+        end
+    end
+end
+local function syncToUI()
+    for i = 1, FCOUNT do
+        local f = F[i]
+        local k = f.key
+        if     k == "AutoBuy"   then f.value = autoBuyActive
+        elseif k == "LemonFarm" then f.value = lemonFarmActive
+        elseif k == "CashFarm"  then f.value = cashFarmActive
+        end
+    end
+end
+local function stopAll()
+    autoBuyActive, lemonFarmActive, cashFarmActive = false, false, false
+    invalidateButtonCache()
+    syncToUI()
+    print("[Hub] Everything stopped!")
+end
+
+-- ==================== AUTOBUY ====================
 local function normalizeColor(c)
     local r, g, b = c.R, c.G, c.B
     if r <= 1 and g <= 1 and b <= 1 then
@@ -57,244 +177,730 @@ local function normalizeColor(c)
 end
 
 local function isGreyedOut(v)
-    local ok, color3 = pcall(function() return v.Color end)
+    local ok, color3 = pcall_(function() return v.Color end)
     if not ok or not color3 then return false end
     local r, g, b = normalizeColor(color3)
-    return math.abs(r - g) < 30 and math.abs(g - b) < 30 and math.abs(r - b) < 30 and r < 200
+    return mabs(r - g) < 30 and mabs(g - b) < 30 and mabs(r - b) < 30 and r < 200
 end
 
-local function getButtonsContainer(tycoon)
-    if buttonsContainer and buttonsContainer:IsDescendantOf(tycoon) then
-        return buttonsContainer
-    end
-    local now = tick()
-    if (now - lastContainerScan) < 1.0 then return tycoon end
-    lastContainerScan = now
-    for _, child in ipairs(tycoon:GetChildren()) do
-        if child:IsA("Folder") or child:IsA("Model") then
-            local name = child.Name:lower()
-            if name:find("button") or name:find("purchase") or name:find("buy") then
-                buttonsContainer = child
-                return child
-            end
-        end
-    end
-    for _, v in pairs(tycoon:GetDescendants()) do
-        if v.Name == "Button" and v:IsA("BasePart") then
-            local ancestor = v.Parent
-            while ancestor and ancestor.Parent and ancestor.Parent ~= tycoon and ancestor.Parent ~= workspace do
-                ancestor = ancestor.Parent
-            end
-            if ancestor and ancestor ~= tycoon then
-                buttonsContainer = ancestor
-                return ancestor
-            end
-        end
-    end
-    return tycoon
+-- ===== Cached button scan =====
+-- Mantiene una lista de botones conocidos y la valida con .Parent en cada call (barato).
+-- Solo cada BUTTON_RESCAN_INTERVAL segundos hace un walk completo con GetDescendants
+-- para detectar botones recién spawneados (caro pero infrecuente).
+local buttonCache            = {}
+local buttonCacheKeys        = {}
+local lastFullRescan         = 0
+
+local function invalidateButtonCache()
+    buttonCache     = {}
+    buttonCacheKeys = {}
+    lastFullRescan  = 0
 end
 
-local function getButtons(tycoon)
-    local now = tick()
-    local shouldScan = needsRescan
-        or ((#cachedButtons == 0) and (now - lastScanTime) > 1.0)
-        or ((now - lastScanTime) > 1.0)
-    if shouldScan then
-        needsRescan = false
-        lastScanTime = now
-        local container = getButtonsContainer(tycoon)
-        local buttons = {}
-        local searchList = (container == tycoon) and container:GetChildren() or container:GetDescendants()
-        for _, v in pairs(searchList) do
-            if v and v.Parent and v.Name == "Button" and v:IsA("BasePart") then
-                table.insert(buttons, v)
-            end
-        end
-        cachedButtons = buttons
+-- Fuerza que el próximo getButtonsRealTime() haga un rescan completo
+-- (sin tirar el cache existente). Usado cuando la cola queda crítica.
+-- v5.9: dos variantes
+--   forceFullRescan()    -> throttled, para llamadas frecuentes del Coord
+--   forceFullRescanNow() -> sin throttle, para emergencias del Worker
+-- El throttle evita force-rescan storms del Coord (que llama cada COORD_WAIT)
+-- pero el Worker SIEMPRE debe poder forzar rescan inmediato cuando está vacío.
+local lastForceRescan = 0
+local function forceFullRescan()
+    local now = tick_()
+    if now - lastForceRescan >= FORCE_RESCAN_MIN_GAP then
+        lastForceRescan = now
+        lastFullRescan  = 0
     end
-    local activeButtons = {}
-    for _, btn in ipairs(cachedButtons) do
-        if btn and btn.Parent and btn:IsDescendantOf(tycoon) then
-            table.insert(activeButtons, btn)
-        end
-    end
-    return activeButtons
+end
+local function forceFullRescanNow()
+    lastForceRescan = tick_()
+    lastFullRescan  = 0
 end
 
-local function resetBuyState()
-    cachedButtons = {}
-    buttonsContainer = nil
-    lastContainerScan = 0
-    needsRescan = true
-end
+local function fullRescanButtons()
+    if not myTycoon or not myTycoon.Parent then return end
+    local purchases = myTycoon:FindFirstChild("Purchases")
+    if not purchases then return end
 
-myTycoon = getTycoon()
-print("=== Sell Lemons Script ===")
-print("1 = Toggle Auto Buy | 2 = Toggle Lemon Farm | 9 = Stop All")
-print(myTycoon and "Tycoon found: " .. myTycoon.Name or "WARNING: Tycoon not found!")
-
-_G.SellLemonsConnection = RunService.RenderStepped:Connect(function()
-    if not _G.SellLemonsActive then return end
-
-    if activeMode == "farm" then
-        local chr = player.Character
-        local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            safeCall(function() hrp.AssemblyLinearVelocity = Vector3.new(0, 2, 0) end)
-            if currentFruit then
-                local headPos = hrp.Position + Vector3.new(0, 1.5, 0)
-                camera.lookAt(headPos, currentFruit)
-            end
-        end
-    end
-
-    -- Key 1 toggle auto buy
-    local k1 = iskeypressed(KEYS.AUTOBUY)
-    if k1 and not key1Down then
-        key1Down = true
-        if activeMode == "buy" then
-            activeMode = "none"
-            print("Auto Buy: OFF")
-        else
-            activeMode = "buy"
-            resetBuyState()
-            print("Auto Buy: ON")
-        end
-    elseif not k1 then
-        key1Down = false
-    end
-
-    -- Key 2 toggle lemon farm
-    local k2 = iskeypressed(KEYS.LEMON)
-    if k2 and not key2Down then
-        key2Down = true
-        if activeMode == "farm" then
-            activeMode = "none"
-            currentFruit = nil
-            print("Lemon Farm: OFF")
-        else
-            activeMode = "farm"
-            print("Lemon Farm: ON")
-        end
-    elseif not k2 then
-        key2Down = false
-    end
-
-    -- Key 9 stop all
-    local k9 = iskeypressed(KEYS.STOP)
-    if k9 and not key9Down then
-        key9Down = true
-        activeMode = "none"
-        currentFruit = nil
-        print("Everything stopped!")
-    elseif not k9 then
-        key9Down = false
-    end
-end)
-
-task.spawn(function()
-    while _G.SellLemonsActive do
-        local character = player.Character
-        local hrp = character and character:FindFirstChild("HumanoidRootPart")
-
-        if not myTycoon then
-            myTycoon = getTycoon()
-            if myTycoon then
-                buttonsContainer = nil
-                lastContainerScan = 0
-            end
-        end
-
-        -- AUTO BUY
-        if activeMode == "buy" and myTycoon and hrp then
-            local buttons = getButtons(myTycoon)
-            local anyBuyable = false
-
-            for _, button in ipairs(buttons) do
-                if activeMode ~= "buy" then break end
-                local exists = button and button.Parent and button:IsDescendantOf(myTycoon)
-                if not exists then continue end
-                if isGreyedOut(button) then continue end
-
-                anyBuyable = true
-
-                safeCall(function()
-                    if firetouchinterest then
-                        hrp.CFrame = CFrame.new(button.Position.X, button.Position.Y, button.Position.Z)
-                        firetouchinterest(button, hrp, 0)
-                        task.wait(0.02)
-                        firetouchinterest(button, hrp, 1)
-                    else
-                        hrp.CFrame = CFrame.new(button.Position.X, button.Position.Y + 2.5, button.Position.Z)
-                        task.wait(0.04)
-                        hrp.CFrame = CFrame.new(button.Position.X, button.Position.Y + 0.8, button.Position.Z)
-                        task.wait(0.04)
+    for _, purchaseFolder in ipairs_(purchases:GetChildren()) do
+        local buttonsFolder = purchaseFolder:FindFirstChild("Buttons")
+        if buttonsFolder then
+            for _, model in ipairs_(buttonsFolder:GetChildren()) do
+                local btn = model:FindFirstChild("Button")
+                if btn and btn:IsA("BasePart") and btn.Parent then
+                    local k = getButtonKey(btn)
+                    if k and not buttonCacheKeys[k] then
+                        buttonCacheKeys[k] = true
+                        tinsert(buttonCache, btn)
                     end
-                end)
-
-                task.wait(0.01)
-            end
-
-            needsRescan = true
-
-            if not anyBuyable then
-                task.wait(0.5)
-                resetBuyState()
-            else
-                task.wait(0.05)
-            end
-
-        -- LEMON FARM
-        elseif activeMode == "farm" and hrp then
-            local count = 0
-            for _, v in pairs(workspace:GetDescendants()) do
-                if activeMode ~= "farm" then break end
-                count = count + 1
-                if count % 200 == 0 then task.wait() end
-
-                if v.Name == "ClickPart" then
-                    local fruit = v.Parent
-                    local tree = fruit and fruit.Parent
-
-                    local modified = {}
-                    if tree then
-                        for _, part in pairs(tree:GetDescendants()) do
-                            if part:IsA("BasePart") and part ~= v then
-                                pcall(function()
-                                    part.CanQuery = false
-                                    table.insert(modified, part)
-                                end)
-                            end
+                end
+                for _, child in ipairs_(model:GetDescendants()) do
+                    if child.Name == "Button" and child ~= btn and child:IsA("BasePart") and child.Parent then
+                        local k = getButtonKey(child)
+                        if k and not buttonCacheKeys[k] then
+                            buttonCacheKeys[k] = true
+                            tinsert(buttonCache, child)
                         end
-                    end
-
-                    if not v or not v:IsDescendantOf(workspace) then continue end
-
-                    local tpPos = Vector3.new(v.Position.X, v.Position.Y - 4, v.Position.Z)
-                    hrp.CFrame = CFrame.new(tpPos.X, tpPos.Y, tpPos.Z)
-                    currentFruit = v.Position
-
-                    local cx = math.floor(camera.ViewportSize.X / 2)
-                    local cy = math.floor(camera.ViewportSize.Y / 2)
-                    mousemoveabs(cx, cy)
-
-                    local deadline = tick() + 0.15
-                    while tick() < deadline and v and v:IsDescendantOf(workspace) do
-                        if activeMode ~= "farm" then break end
-                        mouse1click()
-                        task.wait(0.04)
-                    end
-
-                    for _, part in pairs(modified) do
-                        pcall(function() part.CanQuery = true end)
                     end
                 end
             end
-            print("Lemon sweep done!")
-            task.wait(0.1)
+        end
+    end
+    lastFullRescan = tick_()
+end
 
-        else
-            task.wait(0.1)
+local function getButtonsRealTime()
+    if not myTycoon then return {} end
+
+    -- Rescan completo periódico para detectar nuevos botones (caro pero infrecuente)
+    if tick_() - lastFullRescan >= BUTTON_RESCAN_INTERVAL then
+        fullRescanButtons()
+    end
+
+    -- Hot path: poda dead buttons del cache (solo .Parent check, muy barato)
+    local alive    = {}
+    local aliveKey = {}
+    local n        = 0
+    local cache    = buttonCache
+    for i = 1, #cache do
+        local b = cache[i]
+        if b and b.Parent then
+            n = n + 1
+            alive[n] = b
+            local k = getButtonKey(b)
+            if k then aliveKey[k] = true end
+        end
+    end
+    buttonCache     = alive
+    buttonCacheKeys = aliveKey
+    return alive
+end
+
+local function getLemonsFast()
+    local temp = {}
+
+    -- Helper: extrae limones de un LemonTree dado y los agrega a `temp`
+    local function harvestLemonTree(lemonTree)
+        for _, fruit in ipairs_(lemonTree:GetChildren()) do
+            if fruit.Name == "Fruit" then
+                local clickPart = fruit:FindFirstChild("ClickPart")
+                if clickPart and clickPart:IsA("BasePart") then
+                    tinsert(temp, clickPart)
+                end
+                for _, child in ipairs_(fruit:GetDescendants()) do
+                    if child.Name == "ClickPart" and child ~= clickPart and child:IsA("BasePart") then
+                        tinsert(temp, child)
+                    end
+                end
+            end
+        end
+    end
+
+    -- (1) LemonTree directo en Workspace (game.Workspace.LemonTree.Fruit)
+    local rootLemonTree = Workspace:FindFirstChild("LemonTree")
+    if rootLemonTree then
+        harvestLemonTree(rootLemonTree)
+    end
+
+    -- (2) LemonTree dentro de cada Tycoon (Tycoon → Constant → Trees → LemonTree)
+    for _, tycoon in ipairs_(Workspace:GetChildren()) do
+        if tycoon.Name:find("Tycoon") then
+            local constant = tycoon:FindFirstChild("Constant")
+            if not constant then continue end
+            local trees = constant:FindFirstChild("Trees")
+            if not trees then continue end
+            local lemonTree = trees:FindFirstChild("LemonTree")
+            if not lemonTree then continue end
+
+            harvestLemonTree(lemonTree)
+        end
+    end
+
+    return temp
+end
+
+local function getCashDropsFast()
+    local folder = Workspace:FindFirstChild("CashDrops")
+    if not folder then return {} end
+    local temp = {}
+    for _, v in ipairs_(folder:GetDescendants()) do
+        if v.Name == "TouchInterest" then
+            local parent = v.Parent
+            if parent and parent:IsA("BasePart") then
+                tinsert(temp, parent)
+            end
+        end
+    end
+    return temp
+end
+
+local lastButtonCount = 0
+local lastLemonCount  = 0
+local lastCashCount   = 0
+
+-- ==================== TECLA 9 + ANTIGRAV (fusionados en 1 RenderStepped) ====================
+local ANTIGRAV_VEL = Vec3(0, 2, 0)
+RunService.RenderStepped:Connect(function()
+    if not ScriptActive then return end
+
+    -- Tecla 9: toggle off del lemon farm
+    if iskeypressed(57) then
+        if not key9Down then
+            key9Down = true
+            if lemonFarmActive then
+                lemonFarmActive = false
+                syncToUI()
+                print("[Hub] Tecla 9: Lemon Farm OFF")
+            end
+        end
+    else
+        key9Down = false
+    end
+
+    -- Antigrav durante lemon farm
+    if lemonFarmActive then
+        local chr = player.Character
+        local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            pcall_(function() hrp.AssemblyLinearVelocity = ANTIGRAV_VEL end)
         end
     end
 end)
+
+-- ==================== SISTEMA v5.3 - 1 WORKER + COLA LOCAL PERSISTENTE ====================
+local localQueue   = {}
+local queueIndex   = 1
+local queueLock    = false
+local totalBought  = 0
+local lastResetTime = 0
+
+local function appendNewButtons()
+    while queueLock do task_wait(0.001) end
+    queueLock = true
+
+    if not myTycoon or not myTycoon.Parent then
+        queueLock = false
+        return 0
+    end
+
+    local buttons = getButtonsRealTime()
+    lastButtonCount = #buttons
+
+    local existingKeys = {}
+    local lq = localQueue
+    local lqLen = #lq
+    for i = queueIndex, lqLen do
+        local it = lq[i]
+        if it and it.key then existingKeys[it.key] = true end
+    end
+
+    local chr = player.Character
+    local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
+    local hrpPos = hrp and hrp.Position or nil
+    local added = 0
+
+    for _, v in ipairs_(buttons) do
+        local key = getButtonKey(v)
+        if key and not existingKeys[key] and not isGreyedOut(v) then
+            local dist = hrpPos and (v.Position - hrpPos).Magnitude or 999999
+            tinsert(lq, {
+                btn  = v,
+                key  = key,
+                dist = dist
+            })
+            added = added + 1
+        end
+    end
+
+    -- v5.9: ordenar porción activa de la cola por distancia al player.
+    -- Esto produce bursts naturales: el worker siempre procesa el más
+    -- cercano disponible, agotando clusters antes de TPs largos.
+    if SORT_QUEUE_BY_DISTANCE and hrpPos and added > 0 then
+        -- Recompute dist de toda la cola activa (player se movió)
+        for i = queueIndex, #lq do
+            local it = lq[i]
+            if it and it.btn and it.btn.Parent then
+                local p = it.btn.Position
+                it.dist = (p - hrpPos).Magnitude
+            end
+        end
+        -- Sort solo la porción activa (queueIndex..#lq)
+        local active = {}
+        local an = 0
+        for i = queueIndex, #lq do
+            an = an + 1
+            active[an] = lq[i]
+        end
+        table.sort(active, function(a, b) return (a.dist or 0) < (b.dist or 0) end)
+        for i = 1, an do
+            lq[queueIndex - 1 + i] = active[i]
+        end
+    end
+
+    queueLock = false
+    return added
+end
+
+local function allButtonsDead()
+    local buttons = getButtonsRealTime()
+    if #buttons == 0 then return false end
+    for _, v in ipairs_(buttons) do
+        if not isGreyedOut(v) then
+            return false
+        end
+    end
+    return true
+end
+
+local function cleanupQueue()
+    if queueIndex <= 20 then return end
+    while queueLock do task_wait(0.001) end
+    queueLock = true
+
+    if queueIndex > 20 then
+        local newQueue = {}
+        local lq = localQueue
+        local n = 0
+        for i = queueIndex, #lq do
+            n = n + 1
+            newQueue[n] = lq[i]
+        end
+        localQueue = newQueue
+        queueIndex = 1
+    end
+
+    queueLock = false
+end
+
+-- Toma siguiente candidato válido de la cola (extraído del worker para evitar duplicación)
+local function popNextValidItem()
+    local lq = localQueue
+    while queueIndex <= #lq do
+        local candidate = lq[queueIndex]
+        queueIndex = queueIndex + 1
+
+        if candidate and candidate.btn and candidate.btn.Parent
+           and not isGreyedOut(candidate.btn) then
+            return candidate
+        end
+    end
+    return nil
+end
+
+-- Worker único y rápido
+task_spawn(function()
+    local emptyStreak = 0
+
+    while ScriptActive do
+        syncFromUI()
+        if not autoBuyActive then
+            task_wait(WORKER_IDLE_WAIT)
+            continue
+        end
+
+        local character = player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        if not hrp or not myTycoon then
+            task_wait(WORKER_IDLE_WAIT)
+            continue
+        end
+
+        local item = popNextValidItem()
+
+        if not item then
+            local remaining = #localQueue - queueIndex + 1
+            if remaining <= WORKER_REFILL_THRESHOLD then
+                -- Cola crítica desde el worker: rescan inmediato SIN throttle
+                forceFullRescanNow()
+                local added = appendNewButtons()
+                if added > 0 then
+                    if added >= 3 then
+                        print("[Worker] Appended: +" .. added)
+                    end
+                    item = popNextValidItem()
+                end
+            end
+        end
+
+        if not item then
+            if allButtonsDead() then
+                local now = tick_()
+                if now - lastResetTime > 2 then
+                    lastResetTime = now
+                    print("[Worker] ALL DEAD! Reset...")
+                    invalidateButtonCache()
+                    localQueue = {}
+                    queueIndex = 1
+                    appendNewButtons()
+                end
+            else
+                emptyStreak = emptyStreak + 1
+                if emptyStreak > EMPTY_STREAK_TRIGGER then
+                    emptyStreak = 0
+                    forceFullRescanNow()
+                    appendNewButtons()
+                end
+            end
+            task_wait(WORKER_IDLE_WAIT)
+            continue
+        end
+
+        emptyStreak = 0
+
+        -- TELETRANSPORTE Y COMPRA
+        local key = item.key
+        local btn = item.btn
+        local pos = btn.Position
+        local px, py, pz = pos.X, pos.Y, pos.Z
+
+        pcall_(function() hrp.CFrame = CF(px, py + 2.5, pz) end)
+        task_wait(TP_WAIT_1)
+        pcall_(function() hrp.CFrame = CF(px, py + 0.8, pz) end)
+        task_wait(TP_WAIT_2)
+
+        task_wait(BUY_SETTLE)
+        local stillExists = false
+        pcall_(function()
+            stillExists = btn and btn.Parent and btn:IsDescendantOf(myTycoon)
+        end)
+
+        if stillExists then
+            print("[Worker] FAILED: " .. key)
+        else
+            totalBought = totalBought + 1
+            if totalBought % LOG_BOUGHT_EVERY == 0 then
+                print("[Worker] BOUGHT: " .. key .. " | Total: " .. totalBought)
+            end
+        end
+
+        if totalBought % CLEANUP_EVERY_N_BOUGHT == 0 then
+            cleanupQueue()
+        end
+    end
+end)
+
+-- Coordinador
+task_spawn(function()
+    while ScriptActive do
+        syncFromUI()
+        if not autoBuyActive then
+            task_wait(COORD_WAIT * 2)
+            continue
+        end
+
+        if not myTycoon or not myTycoon.Parent then
+            myTycoon = findMyTycoon()
+            if myTycoon then
+                invalidateButtonCache()
+                localQueue = {}
+                queueIndex = 1
+                print("[Coord] Tycoon re-found!")
+            else
+                task_wait(0.5)
+                continue
+            end
+        end
+
+        local remaining = #localQueue - queueIndex + 1
+        if remaining < COORD_REFILL_THRESHOLD then
+            -- Cola crítica: forzar rescan completo para nunca quedarse sin items
+            forceFullRescan()
+            local added = appendNewButtons()
+            -- Log throttleado: solo si se añadieron muchos a la vez
+            if added >= 3 then
+                print("[Coord] Appended: " .. added)
+            end
+        end
+
+        task_wait(COORD_WAIT)
+    end
+end)
+
+-- ==================== LEMON FARM ====================
+-- Anti-stuck: registra intentos por limón (por posición). Si un limón falla N veces
+-- consecutivas, se marca como inalcanzable temporalmente para no bloquear la pasada.
+local lemonFailCount  = {}   -- [posKey] = nº de intentos fallidos consecutivos
+local LEMON_MAX_FAILS = 3    -- tras este nº, se ignora durante el ciclo actual
+local LEMON_MAX_PASSES = 6   -- tope de re-escaneos por ciclo (seguridad)
+
+local function lemonKey(v)
+    local pos = v.Position
+    return mfloor(pos.X + 0.5) .. "," .. mfloor(pos.Y + 0.5) .. "," .. mfloor(pos.Z + 0.5)
+end
+
+-- Procesa un único limón (extraído del bucle original sin cambios de método)
+local function processLemon(v, hrp)
+    if not v or not v:IsDescendantOf(Workspace) then return false end
+
+    local fruit    = v.Parent
+    local tree     = fruit and fruit.Parent
+    local modified = {}
+    local modCount = 0
+
+    if tree then
+        for _, part in ipairs_(tree:GetDescendants()) do
+            if part ~= v and part:IsA("BasePart") then
+                pcall_(function()
+                    part.CanQuery = false
+                    modCount = modCount + 1
+                    modified[modCount] = part
+                end)
+            end
+        end
+    end
+
+    local vp = v.Position
+    local tpX, tpY, tpZ = vp.X, vp.Y - 4, vp.Z
+    hrp.CFrame = CF(tpX, tpY, tpZ)
+    task_wait(0.02)
+
+    camera.lookAt(Vec3(tpX, tpY, tpZ), vp)
+    task_wait(0.02)
+
+    local vps = camera.ViewportSize
+    local cx  = mfloor(vps.X / 2)
+    local cy  = mfloor(vps.Y / 2)
+    mousemoveabs(cx, cy)
+    mouse1click()
+    task_wait(0.015)
+    mouse1click()
+
+    for j = 1, modCount do
+        local part = modified[j]
+        pcall_(function() part.CanQuery = true end)
+    end
+    task_wait(0.015)
+
+    -- Verifica si el limón desapareció (= recogido)
+    return not (v and v.Parent and v:IsDescendantOf(Workspace))
+end
+
+task_spawn(function()
+    while ScriptActive do
+        syncFromUI()
+        local character = player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+        if lemonFarmActive and hrp then
+            -- Reset de contadores al iniciar cada ciclo completo
+            lemonFailCount = {}
+
+            local pass            = 0
+            local lastSeenCount   = -1
+            local sameCountStreak = 0
+
+            -- Bucle de pasadas: re-escanea hasta que no queden limones
+            -- (o se exceda el tope de seguridad)
+            while ScriptActive and lemonFarmActive and pass < LEMON_MAX_PASSES do
+                pass = pass + 1
+                local snapshot = getLemonsFast()
+                local count    = #snapshot
+                lastLemonCount = count
+
+                if count == 0 then break end
+
+                -- Detecta estancamiento (mismo conteo en varias pasadas
+                -- = limones inalcanzables, no tiene sentido seguir)
+                if count == lastSeenCount then
+                    sameCountStreak = sameCountStreak + 1
+                    if sameCountStreak >= 2 then break end
+                else
+                    sameCountStreak = 0
+                    lastSeenCount = count
+                end
+
+                -- Refresh del HRP por si el personaje se respawneó entre pasadas
+                local chr2 = player.Character
+                hrp = chr2 and chr2:FindFirstChild("HumanoidRootPart")
+                if not hrp then break end
+
+                for i = 1, count do
+                    if not lemonFarmActive then break end
+                    local v = snapshot[i]
+                    if v and v:IsDescendantOf(Workspace) then
+                        local lk    = lemonKey(v)
+                        local fails = lemonFailCount[lk] or 0
+
+                        -- Salta limones que ya fallaron demasiadas veces este ciclo
+                        if fails < LEMON_MAX_FAILS then
+                            local ok = processLemon(v, hrp)
+                            if ok then
+                                lemonFailCount[lk] = nil
+                            else
+                                lemonFailCount[lk] = fails + 1
+                            end
+                        end
+                    end
+                end
+
+                -- Pequeño wait entre pasadas para dejar que el server
+                -- procese los limones recién recogidos antes de re-escanear
+                task_wait(0.08)
+            end
+
+            task_wait(0.1)
+        else
+            task_wait(0.05)
+        end
+    end
+end)
+
+-- ==================== CASH FARM ====================
+task_spawn(function()
+    while ScriptActive do
+        syncFromUI()
+        local character = player.Character
+        local head = character and character:FindFirstChild("Head")
+
+        if cashFarmActive and head then
+            local snapshot = getCashDropsFast()
+            local count    = #snapshot
+            lastCashCount  = count
+
+            local headPos = head.Position
+            for i = 1, count do
+                if not cashFarmActive then break end
+                local parent = snapshot[i]
+                if parent and parent.Parent then
+                    pcall_(function() parent.Position = headPos end)
+                end
+            end
+            task_wait(0.3)
+        else
+            task_wait(0.2)
+        end
+    end
+end)
+
+-- ==================== UI RENDER ====================
+local function Render()
+    local upx, upy = uiPos.X, uiPos.Y
+    local usx, usy = uiSize.X, uiSize.Y
+
+    Shadow.Position   = Vec2(upx - 3, upy - 3)
+    MainBG.Position   = uiPos
+    TopBar.Position   = uiPos
+    AccLine.Position  = Vec2(upx, upy + 30)
+    TitleTxt.Position = Vec2(upx + 10, upy + 8)
+
+    local slotX_lbl   = upx + 16
+    local slotX_check = upx + usx - 22
+
+    local slot = 0
+    for i = 1, FCOUNT do
+        local f = F[i]
+        slot = slot + 1
+        if slot <= MAXS then
+            local yy   = upy + 60 + ((slot - 1) * 28)
+            local lbl  = SLabel[slot]
+            local chk  = SCheck[slot]
+            local fll  = SFill[slot]
+            local kind = f.kind
+            local isAction = (kind == "action")
+
+            lbl.Text     = isAction and (">> " .. f.label) or ("> " .. f.label)
+            lbl.Position = Vec2(slotX_lbl, yy)
+            lbl.Color    = isAction and COL_LBL_ACT or (f.value and COL_LBL_ON or COL_LBL_OFF)
+            lbl.Visible  = true
+
+            local checkPos = Vec2(slotX_check, yy + 7)
+            chk.Position = checkPos
+            chk.Visible  = (kind == "toggle")
+
+            fll.Position = checkPos
+            fll.Visible  = (kind == "toggle" and f.value == true)
+        end
+    end
+    for i = slot + 1, MAXS do
+        SLabel[i].Visible = false
+        SCheck[i].Visible = false
+        SFill[i].Visible  = false
+    end
+
+    local chr = player.Character
+    local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
+    local yVal = hrp and mfloor(hrp.Position.Y) or "?"
+
+    StatusTxt.Text = sformat("Y:%s | Btns:%d | Lems:%d | Cash:%d | B:%d | Q:%d/%d",
+        tostring_(yVal), lastButtonCount, lastLemonCount, lastCashCount,
+        totalBought, (#localQueue - queueIndex + 1), #localQueue)
+    StatusTxt.Position = Vec2(upx + 10, upy + usy - 16)
+end
+
+task_spawn(function()
+    while ScriptActive do
+        task_wait(0.016)
+        local mx, my = 0, 0
+        if mouse then
+            pcall_(function() mx = mouse.X; my = mouse.Y end)
+        else
+            pcall_(function() local m = player:GetMouse(); mx = m.X; my = m.Y end)
+        end
+        local m1 = false
+        pcall_(function() m1 = ismouse1pressed() end)
+
+        if m1 and not lastM1 then
+            local upx, upy = uiPos.X, uiPos.Y
+            local usx      = uiSize.X
+            local xMin, xMax = upx + 10, upx + usx - 10
+
+            local slot = 0
+            for i = 1, FCOUNT do
+                local f = F[i]
+                slot = slot + 1
+                if slot <= MAXS then
+                    local yy = upy + 60 + ((slot - 1) * 28)
+                    if mx >= xMin and mx <= xMax and my >= yy - 2 and my <= yy + 22 then
+                        local kind = f.kind
+                        if kind == "toggle" then
+                            local key = f.key
+                            if key == "AutoBuy" and not f.value then
+                                for j = 1, FCOUNT do
+                                    local ff = F[j]
+                                    if ff.key == "LemonFarm" then ff.value = false end
+                                end
+                            elseif key == "LemonFarm" and not f.value then
+                                for j = 1, FCOUNT do
+                                    local ff = F[j]
+                                    if ff.key == "AutoBuy" then ff.value = false end
+                                end
+                            end
+                            f.value = not f.value
+                            syncFromUI()
+                            print("[Hub] TOGGLED: " .. key .. " = " .. tostring_(f.value))
+                        elseif kind == "action" then
+                            print("[Hub] ACTION: " .. f.key)
+                            if f.key == "StopAll" then stopAll() end
+                        end
+                    end
+                end
+            end
+
+            if mx >= upx and mx <= upx + usx and my >= upy and my <= upy + 30 then
+                dragging = true
+                dragOff  = Vec2(mx - upx, my - upy)
+            end
+        end
+
+        if dragging then
+            if m1 then
+                uiPos = Vec2(mx - dragOff.X, my - dragOff.Y)
+            else
+                dragging = false
+            end
+        end
+
+        lastM1 = m1
+        pcall_(Render)
+    end
+end)
+
+_G.MatchaCleanup = function()
+    ScriptActive = false
+    for _, obj in ipairs_(drawObjs) do
+        pcall_(function() obj:Remove() end)
+    end
+    print("[Hub] Cleanup done")
+end
+
+print("[Hub] v5.9 BURST MODE Loaded")
