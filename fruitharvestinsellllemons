@@ -42,7 +42,10 @@ local autoBuyActive    = false
 local lemonFarmActive  = false
 local cashFarmActive   = true   -- ON por default
 local autoStandActive   = false
-local key9Down        = false
+local key1Down        = false
+local key2Down        = false
+local key3Down        = false
+local _standIsTapping = false   -- Gate: true while AutoStand is in E-tap phase
 
 local buyBlacklist    = {}
 local failedButtons   = {}
@@ -51,7 +54,7 @@ local function getButtonKey(v)
     if not v then return nil end
     local pos = v.Position
     if not pos then return nil end
-    return mfloor(pos.X + 0.5) .. "," .. mfloor(pos.Y + 0.5) .. "," .. mfloor(pos.Z + 0.5)
+    return sformat("%d,%d,%d", mfloor(pos.X + 0.5), mfloor(pos.Y + 0.5), mfloor(pos.Z + 0.5))
 end
 
 local function resetBuyBlacklist()
@@ -126,10 +129,10 @@ local function feat(key, label, kind)
     tinsert(F, f)
     return f
 end
-feat("AutoBuy",     "AUTO BUY",     "toggle")
-feat("LemonFarm",   "LEMON FARM",   "toggle")
-feat("CashFarm",    "CASH FARM",    "toggle")
-feat("AutoStand",   "AUTO STAND",   "toggle")
+feat("AutoBuy",     "AUTO BUY [1]",     "toggle")
+feat("LemonFarm",   "LEMON FARM [2]",   "toggle")
+feat("CashFarm",    "CASH FARM",        "toggle")
+feat("AutoStand",   "AUTO STAND [3]",   "toggle")
 feat("StopAll",     "STOP ALL",     "action")
 -- Defaults activos al cargar el hub:
 for _, _f in ipairs_(F) do
@@ -408,17 +411,47 @@ local lastCashCount   = 0
 -- ==================== TECLA 9 + ANTIGRAV ====================
 RunService.RenderStepped:Connect(function()
     if not ScriptActive then return end
-    if iskeypressed(57) then
-        if not key9Down then
-            key9Down = true
-            if lemonFarmActive then
-                lemonFarmActive = false
+
+    -- Tecla 1: desactivar AutoBuy (solo OFF)
+    if iskeypressed(49) then
+        if not key1Down then
+            key1Down = true
+            if autoBuyActive then
+                autoBuyActive = false
                 syncToUI()
-                print("[Hub] Tecla 9: Lemon Farm OFF")
+                print("[Hub] Tecla 1: AutoBuy OFF")
             end
         end
     else
-        key9Down = false
+        key1Down = false
+    end
+
+    -- Tecla 2: desactivar LemonFarm (solo OFF)
+    if iskeypressed(50) then
+        if not key2Down then
+            key2Down = true
+            if lemonFarmActive then
+                lemonFarmActive = false
+                syncToUI()
+                print("[Hub] Tecla 2: Lemon Farm OFF")
+            end
+        end
+    else
+        key2Down = false
+    end
+
+    -- Tecla 3: desactivar AutoStand (solo OFF)
+    if iskeypressed(51) then
+        if not key3Down then
+            key3Down = true
+            if autoStandActive then
+                autoStandActive = false
+                syncToUI()
+                print("[Hub] Tecla 3: AutoStand OFF")
+            end
+        end
+    else
+        key3Down = false
     end
 end)
 
@@ -546,44 +579,55 @@ local STAND_TP_Y_OFFSET    = 3                -- studs arriba del modelo
 local STAND_RECHECK_EVERY  = 1                -- cada N stands re-escanea botones
 local STAND_FOLDER_PREFIX  = "Lemon"           -- solo folders que empiecen asi (case-insensitive). "" = todos.
 local STAND_LOOP_DELAY     = 0.1              -- delay entre pasadas completas
+
+-- Cache de stands (evita re-escanear descendants cada llamada)
+local standCache = {}       -- folder -> {model=..., pos=..., ts=...}
+local STAND_CACHE_TTL = 5.0 -- segundos
 -- Price gating: solo TPea al stand si su precio (PlayerGui.<standName>.Upgrade.Price)
 -- es <= a leaderstats.Cash. Si no encuentra el GUI/Price, igual va (failsafe).
 local STAND_USE_PRICE_GATE = true
 local STAND_REQUIRE_PRICE  = true                   -- true = si no hay GUI/Price, SKIP (no TP)
 local STAND_PRICE_PATH     = {"Upgrade", "Price"}  -- ruta relativa al GUI del stand
+-- ==================== TIERED UPGRADE DIAGNOSTICS (hookless) ====================
+local TIER_DIAGNOSTICS      = true   -- print which tier wins/fails per stand
+local TIER_REMOTE_FIRST     = true   -- try remote before TP
+local TIER_GUI_SIGNAL       = true   -- try GUI signal before TP
+local TIER_PROXIMITY        = true   -- try ProximityPrompt before TP
+local TIER_FALLBACK_TP      = true   -- TP+E spam as last resort
+
+local tierStats = { remote = 0, gui = 0, proximity = 0, tp = 0, fail = 0 }
+
 
 -- Encuentra una posicion "TPeable" para un Model. Devuelve Vector3 o nil.
 local function _modelPivotPos(model)
-    -- 1) PrimaryPart
-    local pp = nil
-    pcall_(function() pp = model.PrimaryPart end)
+    if not model then return nil end
+    -- 1) PrimaryPart (fast path)
+    local pp = model.PrimaryPart
     if pp then
-        local p; pcall_(function() p = pp.Position end)
+        local ok2, p = pcall_(function() return pp.Position end)
         if p then return p end
     end
-    -- 2) Model:GetPivot() si existe
-    local piv
-    pcall_(function() piv = model:GetPivot() end)
+    -- 2) Model:GetPivot()
+    local ok, piv = pcall_(function() return model:GetPivot() end)
     if piv then
-        local p; pcall_(function() p = piv.Position end)
+        local ok2, p = pcall_(function() return piv.Position end)
         if p then return p end
     end
     -- 3) Primer BasePart descendiente
-    local desc; pcall_(function() desc = model:GetDescendants() end)
+    local ok, desc = pcall_(function() return model:GetDescendants() end)
     if desc then
         for _, d in ipairs_(desc) do
-            local ok, isBase = pcall_(function() return d:IsA("BasePart") end)
-            if ok and isBase then
-                local p; pcall_(function() p = d.Position end)
+            local isBase = d:IsA("BasePart")
+            if isBase then
+                local ok3, p = pcall_(function() return d.Position end)
                 if p then return p end
             end
         end
     end
     -- 4) GetBoundingBox
-    local cf
-    pcall_(function() cf = model:GetBoundingBox() end)
+    local ok, cf = pcall_(function() return model:GetBoundingBox() end)
     if cf then
-        local p; pcall_(function() p = cf.Position end)
+        local ok2, p = pcall_(function() return cf.Position end)
         if p then return p end
     end
     return nil
@@ -596,54 +640,48 @@ end
 -- attachments, scripts, etc).
 local function _isPlaceholderModel(model)
     if not model then return true end
-    local kids; pcall_(function() kids = model:GetChildren() end)
-    if not kids or #kids == 0 then return true end
+    local ok, kids = pcall_(function() return model:GetChildren() end)
+    if not ok or not kids or #kids == 0 then return true end
     if #kids > 1 then return false end
     local c = kids[1]
     -- 1 hijo BasePart con el MISMO NOMBRE que el Model -> placeholder clasico.
-    -- La carpeta y el Model SIEMPRE existen aunque el stand no haya sido comprado;
-    -- lo que distingue un stand "vacio" es que su Model solo tiene UN Part con
-    -- exactamente el mismo nombre. Skip inmediato, sin price-gate ni TP.
-    local okBase, isBase = pcall_(function() return c:IsA("BasePart") end)
-    if okBase and isBase then
-        local sameName = false
-        pcall_(function() sameName = (c.Name == model.Name) end)
-        if sameName then return true end   -- <-- placeholder confirmado
-        -- Part con nombre DISTINTO: stand real con un solo Part, NO skippear
+    local isBase = c:IsA("BasePart")
+    if isBase then
+        local sameName = c.Name == model.Name
+        if sameName then return true end
         return false
     end
     -- 1 hijo Model -> verificar recursivo (wrappers anidados)
-    local okMdl, isMdl = pcall_(function() return c:IsA("Model") end)
-    if okMdl and isMdl then return _isPlaceholderModel(c) end
-    -- 1 hijo de otra clase (Folder, Configuration, etc.) -> tampoco es stand real
+    local isMdl = c:IsA("Model")
+    if isMdl then return _isPlaceholderModel(c) end
     return true
 end
 
 -- Para cada subfolder de Purchases devuelve un Model "principal" del stand.
 -- Filtra placeholders (stands que aun no se compraron).
 local function _findStandModel(folder)
-    -- 1) Hijo directo Model con mismo nombre que el folder
-    local kids; pcall_(function() kids = folder:GetChildren() end)
+    local ok, kids = pcall_(function() return folder:GetChildren() end)
     if kids then
+        -- 1) Hijo directo Model con mismo nombre que el folder
         for _, c in ipairs_(kids) do
-            local ok, isModel = pcall_(function() return c:IsA("Model") end)
-            if ok and isModel and c.Name == folder.Name then
+            local isModel = c:IsA("Model")
+            if isModel and c.Name == folder.Name then
                 if not _isPlaceholderModel(c) then return c end
             end
         end
         -- 2) Cualquier hijo directo Model (no placeholder)
         for _, c in ipairs_(kids) do
-            local ok, isModel = pcall_(function() return c:IsA("Model") end)
-            if ok and isModel and not _isPlaceholderModel(c) then return c end
+            local isModel = c:IsA("Model")
+            if isModel and not _isPlaceholderModel(c) then return c end
         end
     end
     -- 3) Descendiente Model con PrimaryPart (no placeholder)
-    local desc; pcall_(function() desc = folder:GetDescendants() end)
+    local ok, desc = pcall_(function() return folder:GetDescendants() end)
     if desc then
         for _, d in ipairs_(desc) do
-            local ok, isModel = pcall_(function() return d:IsA("Model") end)
-            if ok and isModel then
-                local pp; pcall_(function() pp = d.PrimaryPart end)
+            local isModel = d:IsA("Model")
+            if isModel then
+                local pp = d.PrimaryPart
                 if pp and not _isPlaceholderModel(d) then return d end
             end
         end
@@ -669,23 +707,32 @@ local function getStandTargets(verbose)
     if not kids then return out end
     local prefix = (STAND_FOLDER_PREFIX or ""):lower()
     local skipped, noModel, noPos = 0, 0, 0
+    local now = tick_()
     for _, folder in ipairs_(kids) do
         local nm = tostring(folder.Name)
         if prefix ~= "" and nm:lower():sub(1, #prefix) ~= prefix then
             skipped = skipped + 1
         else
-            local model = _findStandModel(folder)
+            local cached = standCache[folder]
+            local model, pos
+            if cached and (now - cached.ts) < STAND_CACHE_TTL then
+                model = cached.model
+                pos = cached.pos
+            else
+                model = _findStandModel(folder)
+                if model then
+                    pos = _modelPivotPos(model)
+                end
+                standCache[folder] = {model = model, pos = pos, ts = now}
+            end
             if not model then
                 noModel = noModel + 1
                 if verbose then print("[Stand]   " .. nm .. " -> sin Model") end
+            elseif not pos then
+                noPos = noPos + 1
+                if verbose then print("[Stand]   " .. nm .. " -> Model sin pos") end
             else
-                local pos = _modelPivotPos(model)
-                if not pos then
-                    noPos = noPos + 1
-                    if verbose then print("[Stand]   " .. nm .. " -> Model sin pos") end
-                else
-                    tinsert(out, {folder = folder, model = model, pos = pos, name = nm})
-                end
+                tinsert(out, {folder = folder, model = model, pos = pos, name = nm})
             end
         end
     end
@@ -785,16 +832,16 @@ end
 local function _extractNumber(node)
     if not node then return nil end
     -- ValueBase
-    local okV, isVal = pcall_(function() return node:IsA("ValueBase") end)
-    if okV and isVal then
+    local isVal = node:IsA("ValueBase")
+    if isVal then
         local v; pcall_(function() v = node.Value end)
         if type(v) == "number" then return v end
         local n = _parsePriceText(v)
         if n then return n end
     end
     -- GuiText (TextLabel/TextButton/TextBox)
-    local okT, isText = pcall_(function() return node:IsA("GuiObject") and (node:IsA("TextLabel") or node:IsA("TextButton") or node:IsA("TextBox")) end)
-    if okT and isText then
+    local isText = node:IsA("GuiObject") and (node:IsA("TextLabel") or node:IsA("TextButton") or node:IsA("TextBox"))
+    if isText then
         local t; pcall_(function() t = node.Text end)
         local n = _parsePriceText(t)
         if n then return n end
@@ -868,7 +915,7 @@ local function _getStandPrice(standName, debugLog)
             local shown = 0
             for _, d in ipairs_(kids2) do
                 if shown >= 25 then break end
-                local cls; pcall_(function() cls = d.ClassName end)
+                local cls = d.ClassName
                 local nm = tostring(d.Name)
                 local txt; pcall_(function() txt = d.Text end)
                 local val; pcall_(function() val = d.Value end)
@@ -884,9 +931,9 @@ end
 -- Tap instantaneo: 1 click (press + release casi en el mismo frame).
 local function _tapKeyOnce(key)
     if not _windowFocused() then return false end
-    pcall_(function() keypress(key) end)
+    keypress(key)
     task_wait()  -- 1 frame para que el juego registre el press antes del release
-    pcall_(function() keyrelease(key) end)
+    keyrelease(key)
     return true
 end
 
@@ -899,13 +946,13 @@ local function _pressKeyMany(key, n)
             task_wait(0.2)
             return false
         end
-        pcall_(function() keypress(key) end)
+        keypress(key)
         if STAND_PRESS_HOLD > 0 then
             task_wait(STAND_PRESS_HOLD)
         else
             task_wait()  -- 1 frame, lo minimo para que Matcha flushee el press
         end
-        pcall_(function() keyrelease(key) end)
+        keyrelease(key)
         -- NO hay yield aqui: el siguiente keypress entra de inmediato y
         -- Matcha agrupa (release_i + press_{i+1}) en el mismo flush.
     end
@@ -948,8 +995,8 @@ local function _findScrollAncestor(obj)
     local cur = obj
     while cur and cur.Parent do
         cur = cur.Parent
-        local ok, isScroll = pcall_(function() return cur:IsA("ScrollingFrame") end)
-        if ok and isScroll then return cur end
+        local isScroll = cur:IsA("ScrollingFrame")
+        if isScroll then return cur end
         if cur:IsA("ScreenGui") then break end
     end
     return nil
@@ -1085,86 +1132,23 @@ end
 local function _spamKeyFor(key, durationSec, intervalSec)
     -- ========== PATH OPTIMIZADO PARA E (DIAG v5.17.1) ==========
     if key == 0x45 then
-        -- v5.17.3: HACEMOS MOUSE FOCUS PRIMERO, despues chequeamos foco.
-        -- Antes chequeabamos foco PRIMERO y si daba false (caso comun despues
-        -- del TP), bailabamos sin intentar restaurarlo.
-        -- Ademas usamos mousemoveabs como hace Auto Buy: sin eso el click cae
-        -- donde sea que este el cursor, posiblemente fuera del window de Roblox,
-        -- y no restaura foco.
-        local function _restoreFocus()
-            pcall_(function()
-                if camera and type(mousemoveabs) == "function" and type(mouse1press) == "function" then
-                    local vp = camera.ViewportSize
-                    if vp and vp.X > 0 and vp.Y > 0 then
-                        mousemoveabs(mfloor(vp.X * 0.5), mfloor(vp.Y * 0.5))
-                        task_wait(0.01)
-                        mouse1press()
-                        task_wait(0.02)
-                        mouse1release()
-                    end
-                end
-            end)
+        if not _windowFocused() then
+            task_wait(0.2)
+            return false
         end
 
-        -- Restaurar foco antes de cualquier chequeo
-        _restoreFocus()
-        task_wait(0.03)
-
-        local _entry_focus = _windowFocused()
-        local _entry_active = autoStandActive
-        print(sformat("[E-DIAG] >>> ENTRY focus=%s autoStandActive=%s dur=%.2fs",
-            tostring(_entry_focus), tostring(_entry_active), durationSec or 0))
-
-        if not _entry_focus then
-            -- Segundo intento: el primer click puede haber sido en una zona muerta
-            _restoreFocus()
-            task_wait(0.05)
-            _entry_focus = _windowFocused()
-            print(sformat("[E-DIAG] retry focus after 2nd click: %s", tostring(_entry_focus)))
-            if not _entry_focus then
-                print("[E-DIAG] BAIL entry: window not focused (isrbxactive=false)")
-                task_wait(0.2)
-                return false
-            end
-        end
-        -- 1) Cleanup previo
-        for i = 1, 2 do
-            pcall_(function() keyrelease(0x45) end)
-            task_wait(0.012)
-        end
-
-        local _post_mouse_focus = _windowFocused()
-        print(sformat("[E-DIAG] post-mouse-click focus=%s", tostring(_post_mouse_focus)))
-
-        -- 2) Spam loop con logging
+        _standIsTapping = true
         local t0 = tick_()
-        local cycles = 0
-        local exit_reason = "duration_completed"
-
-        while true do
-            if not autoStandActive then
-                exit_reason = sformat("autoStandActive=false at cycle %d", cycles)
-                break
-            end
-            local elapsed = tick_() - t0
-            if elapsed >= durationSec then
-                break
-            end
-            if not _windowFocused() then
-                exit_reason = sformat("focus_lost at cycle %d t=%.3fs", cycles, elapsed)
-                pcall_(function() keyrelease(0x45) end)
-                break
-            end
-            pcall_(function() keypress(0x45) end)
-            task_wait(0.017)
-            pcall_(function() keyrelease(0x45) end)
-            task_wait(0.018)
-            cycles = cycles + 1
+        while autoStandActive do
+            if (tick_() - t0) >= durationSec then break end
+            if not _windowFocused() then break end
+            keypress(0x45)
+            task_wait(0.015)
+            keyrelease(0x45)
+            task_wait(0.015)
         end
-
-        pcall_(function() keyrelease(0x45) end)
-        print(sformat("[E-DIAG] <<< EXIT cycles=%d reason=%s elapsed=%.3fs",
-            cycles, exit_reason, tick_() - t0))
+        keyrelease(0x45)
+        _standIsTapping = false
         return true
     end
 
@@ -1175,9 +1159,9 @@ local function _spamKeyFor(key, durationSec, intervalSec)
             task_wait(0.2)
             return false
         end
-        pcall_(function() keypress(key) end)
+        keypress(key)
         task_wait()  -- 1 frame
-        pcall_(function() keyrelease(key) end)
+        keyrelease(key)
         if intervalSec and intervalSec > 0 then
             task_wait(intervalSec)
         else
@@ -1247,14 +1231,14 @@ local function _getManageStands()
     local kids; pcall_(function() kids = root:GetChildren() end)
     if not kids then return out end
     for _, c in ipairs_(kids) do
-        local okF, isFrame = pcall_(function() return c:IsA("Frame") end)
-        if okF and isFrame then
+        local isFrame = c:IsA("Frame")
+        if isFrame then
             local nm = tostring(c.Name)
             if nm:sub(1, #STAND_MANAGE_BLANK_PREFIX) ~= STAND_MANAGE_BLANK_PREFIX then
                 local upg; pcall_(function() upg = c:FindFirstChild("Upgrade") end)
                 if upg then
-                    local okBtn, isBtn = pcall_(function() return upg:IsA("GuiButton") end)
-                    if okBtn and isBtn then
+                    local isBtn = upg:IsA("GuiButton")
+                    if isBtn then
                         local priceLbl; pcall_(function() priceLbl = upg:FindFirstChild("Price") end)
                         local priceText = nil
                         if priceLbl then pcall_(function() priceText = priceLbl.Text end) end
@@ -1326,12 +1310,6 @@ local function runManagePass(verbose)
         -- "Pasada end" y un loop al 20Hz. El gating con AutoBuy ya lo hace el
         -- driver exterior (linea ~2040: if autoBuyActive and _anyLiveButtons()).
         if not autoStandActive then return "off" end
-        if (i - 1) % STAND_RECHECK_EVERY == 0 then
-            if _anyLiveButtons() then
-                print("[Stand][Manage+TP] Boton vivo detectado, saliendo")
-                return "buttons"
-            end
-        end
         -- (A) Chequeo por color via memoria
         local active, cr, cg, cb = _isUpgradeActive(s.upgrade)
         if active == false then
@@ -1379,7 +1357,6 @@ local function runManagePass(verbose)
             task_wait(STAND_CYCLE_PAUSE)
             continue
         end
-        task_wait(STAND_TP_SETTLE)
         _spamKeyFor(STAND_KEY, STAND_E_SPAM_DURATION, STAND_E_SPAM_INTERVAL)
         tapped = tapped + 1
         if useFallback then
@@ -1406,78 +1383,249 @@ end
 
 -- Una pasada por todos los stands. Devuelve "buttons" si reaparecio uno,
 -- "off" si el usuario apago, "done" si termino la pasada sin novedades.
-local function runStandPass(verbose)
-    local targets = getStandTargets(verbose)
-    if #targets == 0 then return "done" end
-    -- Leer cash una vez por pasada (se re-lee si una compra cambia el monto;
-    -- ojo: si el upgrade restara cash, conviene re-leerlo entre stands).
-    local cash = STAND_USE_PRICE_GATE and _getCash() or nil
-    print(string.format("[Stand] Pasada start, %d stands  cash=%s",
-        #targets, tostring(cash)))
-    local skipped_price, tapped = 0, 0
-    for i, t in ipairs_(targets) do
-        -- v5.17.3: igual que el Manage pass, no requerimos autoBuyActive aca.
-        -- El driver exterior ya gatea con Auto Buy live buttons.
-        if not autoStandActive then return "off" end
-        -- Re-check botones cada STAND_RECHECK_EVERY stands
-        if (i - 1) % STAND_RECHECK_EVERY == 0 then
-            -- v5.17.4: igual que Manage pass, checkear solo si AutoBuy activo.
-            if autoBuyActive and _anyLiveButtons() then
-                print("[Stand] Boton vivo detectado, saliendo del modo stand")
-                return "buttons"
+-- ==================== TIER 1: REMOTE SCAN (hookless) ====================
+local ReplicatedStorage = nil
+pcall_(function() ReplicatedStorage = game:GetService("ReplicatedStorage") end)
+
+local cachedUpgradeRemotes = nil
+local cachedRemoteScanTime = 0
+local REMOTE_CACHE_TTL = 30
+
+local function findUpgradeRemotes()
+    local candidates = {}
+    local function scan(parent)
+        local kids
+        pcall_(function() kids = parent:GetDescendants() end)
+        if not kids then return end
+        for _, d in ipairs_(kids) do
+            local isRF = d:IsA("RemoteFunction")
+            if isRF and d.Name:lower():match("upgrade") then
+                tinsert(candidates, d)
+            end
+            local isRE = d:IsA("RemoteEvent")
+            if isRE and d.Name:lower():match("upgrade") then
+                tinsert(candidates, d)
             end
         end
-        -- Price gating fail-closed: si no hay GUI/Price o cash < price -> SKIP.
-        -- Si STAND_REQUIRE_PRICE=false, sin GUI/Price igual TPea (modo permisivo).
-        if STAND_USE_PRICE_GATE then
-            local gui = _resolveStandGui(t.name)
-            local price = _getStandPrice(t.name, true)
-            cash = _getCash() or cash
-            local reason = nil
-            if not gui then
-                if STAND_REQUIRE_PRICE then reason = "no GUI en PlayerGui" end
-            elseif not price then
-                if STAND_REQUIRE_PRICE then reason = "no price parseable" end
-            elseif not cash then
-                reason = "no leaderstats.Cash"
-            elseif cash < price then
-                reason = sformat("precio=%s > cash=%s", tostring(price), tostring(cash))
+    end
+    if ReplicatedStorage then scan(ReplicatedStorage) end
+    if myTycoon then pcall_(function() scan(myTycoon) end) end
+    return candidates
+end
+
+local function getUpgradeRemotes()
+    local now = tick_()
+    if cachedUpgradeRemotes and (now - cachedRemoteScanTime) < REMOTE_CACHE_TTL then
+        return cachedUpgradeRemotes
+    end
+    cachedUpgradeRemotes = findUpgradeRemotes()
+    cachedRemoteScanTime = now
+    return cachedUpgradeRemotes
+end
+
+local function tryRemoteUpgrade(standName, level)
+    local remotes = getUpgradeRemotes()
+    if not remotes or #remotes == 0 then return false, "no_remotes" end
+    for _, remote in ipairs_(remotes) do
+        local ok, res = pcall_(function()
+            if remote:IsA("RemoteFunction") then
+                return remote:InvokeServer(standName, level or 1)
+            else
+                remote:FireServer(standName, level or 1)
+                return true
             end
-            if reason then
+        end)
+        if ok then return true, "ok" end
+    end
+    return false, "all_remotes_failed"
+end
+
+-- ==================== TIER 2: GUI SIGNAL (hookless) ====================
+local function fireUpgradeGui(standName)
+    local playerGui
+    pcall_(function() playerGui = player:WaitForChild("PlayerGui", 2) end)
+    if not playerGui then return false, "no_playergui" end
+
+    local function scanGui(parent)
+        local kids
+        pcall_(function() kids = parent:GetDescendants() end)
+        if not kids then return false, "no_descendants" end
+        for _, d in ipairs_(kids) do
+            local ok, isButton = pcall_(function()
+                return d:IsA("TextButton") or d:IsA("ImageButton")
+            end)
+            if isButton then
+                local nameMatch = false
+                pcall_(function()
+                    local n = d.Name:lower()
+                    nameMatch = n:match("upgrade") or n:match(standName:lower())
+                end)
+                if nameMatch then
+                    local fired = false
+                    pcall_(function()
+                        if d.MouseButton1Click then
+                            firesignal(d.MouseButton1Click)
+                            fired = true
+                        elseif d.Activated then
+                            firesignal(d.Activated)
+                            fired = true
+                        end
+                    end)
+                    if fired then return true, "signal_fired" end
+                end
+            end
+        end
+        return false, "no_button_found"
+    end
+    return scanGui(playerGui)
+end
+
+-- ==================== TIER 3: PROXIMITY PROMPT (hookless) ====================
+local function triggerProximityPrompt(standModel)
+    local desc
+    pcall_(function() desc = standModel:GetDescendants() end)
+    if not desc then return false, "no_descendants" end
+    for _, d in ipairs_(desc) do
+        local isPrompt = d:IsA("ProximityPrompt")
+        if isPrompt then
+            local triggered = false
+            pcall_(function()
+                if fireproximityprompt then
+                    fireproximityprompt(d)
+                    triggered = true
+                else
+                    d:InputHoldBegin()
+                    task_wait(d.HoldDuration + 0.05)
+                    d:InputHoldEnd()
+                    triggered = true
+                end
+            end)
+            if triggered then return true, "prompt_fired" end
+        end
+    end
+    return false, "no_prompt"
+end
+
+-- ==================== TIERED EXECUTION WITH DIAGNOSTICS ====================
+local function tieredUpgrade(target, level)
+    local name = target.name or "?"
+    local pos = target.pos
+
+    -- Tier 1: Remote
+    if TIER_REMOTE_FIRST then
+        local ok, reason = tryRemoteUpgrade(name, level)
+        if ok then
+            if TIER_DIAGNOSTICS then print("[Tier] Remote OK: " .. name) end
+            tierStats.remote = tierStats.remote + 1
+            return true, "remote"
+        else
+            if TIER_DIAGNOSTICS then print("[Tier] Remote FAIL (" .. reason .. "): " .. name) end
+        end
+    end
+
+    -- Tier 2: GUI Signal
+    if TIER_GUI_SIGNAL then
+        local ok2, reason2 = fireUpgradeGui(name)
+        if ok2 then
+            if TIER_DIAGNOSTICS then print("[Tier] GUI OK: " .. name) end
+            tierStats.gui = tierStats.gui + 1
+            return true, "gui"
+        else
+            if TIER_DIAGNOSTICS then print("[Tier] GUI FAIL (" .. reason2 .. "): " .. name) end
+        end
+    end
+
+    -- Tier 3: Proximity Prompt
+    if TIER_PROXIMITY then
+        local ok3, reason3 = triggerProximityPrompt(target.model)
+        if ok3 then
+            if TIER_DIAGNOSTICS then print("[Tier] Proximity OK: " .. name) end
+            tierStats.proximity = tierStats.proximity + 1
+            return true, "proximity"
+        else
+            if TIER_DIAGNOSTICS then print("[Tier] Proximity FAIL (" .. reason3 .. "): " .. name) end
+        end
+    end
+
+    -- Tier 4: TP + Keyspam (fallback)
+    if TIER_FALLBACK_TP then
+        if pos and _tpHrpTo(pos) then
+            task_wait(STAND_TP_SETTLE)
+            for _ = 1, STAND_PRESSES do
+                keypress(STAND_KEY)
+                keyrelease(STAND_KEY)
+            end
+            if TIER_DIAGNOSTICS then print("[Tier] TP+Key OK: " .. name) end
+            tierStats.tp = tierStats.tp + 1
+            return true, "tp"
+        else
+            if TIER_DIAGNOSTICS then print("[Tier] TP FAIL: " .. name) end
+        end
+    end
+
+    tierStats.fail = tierStats.fail + 1
+    return false, "all_tiers_failed"
+end
+
+local function runStandPass(firstRun)
+    local targets = getStandTargets(firstRun)
+    if #targets == 0 then
+        if firstRun then print("[Stand] No hay stands TPables (prefix='" .. (STAND_FOLDER_PREFIX or "") .. "')") end
+        return "done"
+    end
+
+    local tapped = 0
+    local skipped_price = 0
+    for i, t in ipairs_(targets) do
+        if not ScriptActive or not autoStandActive then return "off" end
+
+        -- Price gating (leaderstats.Cash vs GUI Price)
+        if STAND_USE_PRICE_GATE then
+            local canAfford, price, cash = canAffordStand(t.folder)
+            if canAfford == false then
                 skipped_price = skipped_price + 1
-                print(sformat("[Stand] [%d/%d] %s -> SKIP (%s)",
-                    i, #targets, tostring(t.name), reason))
-                task_wait(STAND_CYCLE_PAUSE)
+                if firstRun then
+                    print(string.format("[Stand] [%d/%d] SKIP precio: %s (necesita %.0f, tienes %.0f)",
+                        i, #targets, tostring(t.name), price or 0, cash or 0))
+                end
                 continue
             end
         end
-        -- TP + tap E (instantaneo)
-        if _tpHrpTo(t.pos) then
-            task_wait(STAND_TP_SETTLE)
-            if STAND_PRESSES <= 1 then
-                _tapKeyOnce(STAND_KEY)
-            else
-                _pressKeyMany(STAND_KEY, STAND_PRESSES)
-            end
-            tapped = tapped + 1
-            print(string.format("[Stand] [%d/%d] %s -> E tap",
-                i, #targets, tostring(t.name)))
-        else
-            print("[Stand] [" .. tostring(i) .. "/" .. #targets .. "] TP fallo en " .. tostring(t.name))
+
+        -- Recheck buttons every N stands
+        if i % STAND_RECHECK_EVERY == 0 then
+            local alive = not allButtonsDead()
+            if alive then return "done" end
         end
+
+        -- Tiered upgrade: Remote -> GUI -> Proximity -> TP
+        local ok, method = tieredUpgrade(t, nil)
+        if ok then
+            tapped = tapped + 1
+        else
+            print("[Stand] [" .. tostring(i) .. "/" .. #targets .. "] ALL TIERS FAILED: " .. tostring(t.name) ..
+                  " | stats: R=" .. tierStats.remote .. " G=" .. tierStats.gui ..
+                  " P=" .. tierStats.proximity .. " T=" .. tierStats.tp .. " F=" .. tierStats.fail)
+        end
+
         task_wait(STAND_CYCLE_PAUSE)
     end
-    print(string.format("[Stand] Pasada end. tap=%d  skip_precio=%d", tapped, skipped_price))
+    print(string.format("[Stand] Pasada end. tap=%d  skip_precio=%d  tiers=%s",
+        tapped, skipped_price,
+        "R:"..tierStats.remote.." G:"..tierStats.gui.." P:"..tierStats.proximity.." T:"..tierStats.tp))
     return "done"
 end
 
--- Worker único y rápido
 task_spawn(function()
     local emptyStreak = 0
 
     while ScriptActive do
         syncFromUI()
         if not autoBuyActive then
+            task_wait(0.05)
+            continue
+        end
+        if _standIsTapping then
             task_wait(0.05)
             continue
         end
@@ -1594,6 +1742,10 @@ task_spawn(function()
     while ScriptActive do
         syncFromUI()
         if not autoBuyActive then
+            task_wait(0.2)
+            continue
+        end
+        if _standIsTapping then
             task_wait(0.2)
             continue
         end
@@ -1984,7 +2136,7 @@ end
 
 task_spawn(function()
     while ScriptActive do
-        task_wait(0.016)
+        task_wait(0.05)
         local mx, my = 0, 0
         if mouse then
             pcall_(function() mx = mouse.X; my = mouse.Y end)
@@ -2115,4 +2267,4 @@ _G.MatchaCleanup = function()
     print("[Hub] Cleanup done")
 end
 
-print("[Hub] v5.16.13 Loaded - color detection via memoria (skip gris instantaneo)")
+print("[Hub] v5.16.15-diag Loaded - hookless tiered upgrade: remote/gui/proximity/TP fallback with diagnostics")
