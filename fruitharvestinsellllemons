@@ -1,4 +1,4 @@
--- [[ COMBINED HUB v5.2 - 1 Worker Rápido + Cola Local Persistente (OPTIMIZED) ]] --
+-- [[ COMBINED HUB v5ee.17.4-final - recheck gates autoBuyActive, spam 28/seg ]] --
 if _G.MatchaCleanup then pcall(_G.MatchaCleanup) end
 local ScriptActive = true
 
@@ -38,9 +38,10 @@ setrobloxinput(true)
 local mouse = nil
 pcall_(function() mouse = player:GetMouse() end)
 
-local autoBuyActive   = false
-local lemonFarmActive = false
-local cashFarmActive  = false
+local autoBuyActive    = false
+local lemonFarmActive  = false
+local cashFarmActive   = true   -- ON por default
+local autoStandActive   = false
 local key9Down        = false
 
 local buyBlacklist    = {}
@@ -76,7 +77,7 @@ local function findMyTycoon()
 end
 myTycoon = findMyTycoon()
 
-print("=== Combined Hub v5.2 SINGLE FAST WORKER (OPTIMIZED) ===")
+print("=== Combined Hub v5.16.3 (taps E snappy) ===")
 
 -- ==================== UI ====================
 local drawObjs = {}
@@ -108,7 +109,7 @@ local Shadow   = D("Square", {Size = Vec2(uiSize.X + 6, uiSize.Y + 6), Color = C
 local MainBG   = D("Square", {Size = uiSize, Color = COL_MAIN, Filled = true, Visible = true})
 local TopBar   = D("Square", {Size = Vec2(uiSize.X, 30), Color = COL_TOP, Filled = true, Visible = true})
 local AccLine  = D("Square", {Size = Vec2(uiSize.X, 2), Color = COL_ACCENT, Filled = true, Visible = true})
-local TitleTxt = D("Text",   {Text = "MATCHA // COMBINED HUB v5.2", Size = 14, Color = COL_ACCENT, Outline = true, Visible = true, Font = SysFont})
+local TitleTxt = D("Text",   {Text = "MATCHA // COMBINED HUB v5.13", Size = 14, Color = COL_ACCENT, Outline = true, Visible = true, Font = SysFont})
 
 local MAXS = 5
 local SLabel, SCheck, SFill = {}, {}, {}
@@ -125,31 +126,38 @@ local function feat(key, label, kind)
     tinsert(F, f)
     return f
 end
-feat("AutoBuy",   "AUTO BUY",   "toggle")
-feat("LemonFarm", "LEMON FARM", "toggle")
-feat("CashFarm",  "CASH FARM",  "toggle")
-feat("StopAll",   "STOP ALL",   "action")
+feat("AutoBuy",     "AUTO BUY",     "toggle")
+feat("LemonFarm",   "LEMON FARM",   "toggle")
+feat("CashFarm",    "CASH FARM",    "toggle")
+feat("AutoStand",   "AUTO STAND",   "toggle")
+feat("StopAll",     "STOP ALL",     "action")
+-- Defaults activos al cargar el hub:
+for _, _f in ipairs_(F) do
+    if _f.key == "CashFarm" then _f.value = true end
+end
 
 local function syncFromUI()
     for _, f in ipairs_(F) do
         local k = f.key
-        if     k == "AutoBuy"   then autoBuyActive   = f.value
-        elseif k == "LemonFarm" then lemonFarmActive = f.value
-        elseif k == "CashFarm"  then cashFarmActive  = f.value
+        if     k == "AutoBuy"     then autoBuyActive     = f.value
+        elseif k == "LemonFarm"   then lemonFarmActive   = f.value
+        elseif k == "CashFarm"    then cashFarmActive    = f.value
+        elseif k == "AutoStand"   then autoStandActive   = f.value
         end
     end
 end
 local function syncToUI()
     for _, f in ipairs_(F) do
         local k = f.key
-        if     k == "AutoBuy"   then f.value = autoBuyActive
-        elseif k == "LemonFarm" then f.value = lemonFarmActive
-        elseif k == "CashFarm"  then f.value = cashFarmActive
+        if     k == "AutoBuy"     then f.value = autoBuyActive
+        elseif k == "LemonFarm"   then f.value = lemonFarmActive
+        elseif k == "CashFarm"    then f.value = cashFarmActive
+        elseif k == "AutoStand"   then f.value = autoStandActive
         end
     end
 end
 local function stopAll()
-    autoBuyActive, lemonFarmActive, cashFarmActive = false, false, false
+    autoBuyActive, lemonFarmActive, cashFarmActive, autoStandActive = false, false, false, false
     resetBuyBlacklist()
     syncToUI()
     print("[Hub] Everything stopped!")
@@ -171,22 +179,84 @@ local function isGreyedOut(v)
     return mabs(r - g) < 30 and mabs(g - b) < 30 and mabs(r - b) < 30 and r < 200
 end
 
-local function getButtonsRealTime()
-    if not myTycoon then return {} end
-    local temp = {}
-    local purchases = myTycoon:FindFirstChild("Purchases")
-    if not purchases then return temp end
+-- ==================== CACHE DE CARPETAS "Buttons" ====================
+-- OJO: NO cacheamos los botones (aparecen poco a poco).
+-- Solo cacheamos las carpetas "Buttons" para no recorrer Purchases cada scan.
+local buttonsFolders   = {}    -- lista plana de carpetas "Buttons"
+local buttonsFolderSet = {}    -- set para dedupe O(1)
+local buttonsCacheReady = false
+local purchasesConnSet = {}    -- evita conectar 2 veces ChildAdded a la misma cat.
 
-    for _, purchaseFolder in ipairs_(purchases:GetChildren()) do
-        local buttonsFolder = purchaseFolder:FindFirstChild("Buttons")
-        if buttonsFolder then
-            for _, model in ipairs_(buttonsFolder:GetChildren()) do
+local function addButtonsFolder(folder)
+    if not folder or buttonsFolderSet[folder] then return end
+    buttonsFolderSet[folder] = true
+    tinsert(buttonsFolders, folder)
+    pcall_(function()
+        folder.AncestryChanged:Connect(function(_, parent)
+            if not parent then
+                buttonsFolderSet[folder] = nil
+                for i = #buttonsFolders, 1, -1 do
+                    if buttonsFolders[i] == folder then
+                        table.remove(buttonsFolders, i)
+                        break
+                    end
+                end
+            end
+        end)
+    end)
+end
+
+local function hookPurchaseCategory(cat)
+    if not cat or purchasesConnSet[cat] then return end
+    purchasesConnSet[cat] = true
+    local bf = cat:FindFirstChild("Buttons")
+    if bf then addButtonsFolder(bf) end
+    pcall_(function()
+        cat.ChildAdded:Connect(function(child)
+            if child.Name == "Buttons" then addButtonsFolder(child) end
+        end)
+    end)
+end
+
+local function buildButtonsCache()
+    buttonsFolders, buttonsFolderSet, purchasesConnSet = {}, {}, {}
+    buttonsCacheReady = false
+    if not myTycoon then return end
+    local purchases = myTycoon:FindFirstChild("Purchases")
+    if not purchases then return end
+
+    for _, cat in ipairs_(purchases:GetChildren()) do
+        hookPurchaseCategory(cat)
+    end
+    pcall_(function()
+        purchases.ChildAdded:Connect(function(newCat)
+            hookPurchaseCategory(newCat)
+        end)
+    end)
+    buttonsCacheReady = true
+end
+
+buildButtonsCache()
+
+local function getButtonsRealTime()
+    if not buttonsCacheReady then
+        buildButtonsCache()
+        if not buttonsCacheReady then return {} end
+    end
+
+    local temp = {}
+    local list = buttonsFolders
+    for i = 1, #list do
+        local bf = list[i]
+        if bf and bf.Parent then
+            for _, model in ipairs_(bf:GetChildren()) do
                 local btn = model:FindFirstChild("Button")
                 if btn and btn:IsA("BasePart") and btn.Parent then
                     tinsert(temp, btn)
                 end
                 for _, child in ipairs_(model:GetDescendants()) do
-                    if child.Name == "Button" and child ~= btn and child:IsA("BasePart") and child.Parent then
+                    if child.Name == "Button" and child ~= btn
+                       and child:IsA("BasePart") and child.Parent then
                         tinsert(temp, child)
                     end
                 end
@@ -196,46 +266,123 @@ local function getButtonsRealTime()
     return temp
 end
 
-local function getLemonsFast()
-    local temp = {}
+-- ==================== CACHE DE LEMON TREES ====================
+-- Igual que con Buttons: el primer escaneo era lento porque getLemonsFast()
+-- recorria Workspace:GetChildren() y bajaba a cada Tycoon -> Constant -> Trees
+-- en cada llamada. Ahora cacheamos referencias DIRECTAS a cada arbol y solo
+-- iteramos esa lista plana. ChildAdded mantiene la cache viva.
+local lemonTrees       = {}
+local lemonTreeSet     = {}
+local lemonTreeCacheReady = false
 
-    -- Helper: extrae limones de un LemonTree dado y los agrega a `temp`
-    local function harvestLemonTree(lemonTree)
-        for _, fruit in ipairs_(lemonTree:GetChildren()) do
-            if fruit.Name == "Fruit" then
-                local clickPart = fruit:FindFirstChild("ClickPart")
-                if clickPart and clickPart:IsA("BasePart") then
-                    tinsert(temp, clickPart)
-                end
-                for _, child in ipairs_(fruit:GetDescendants()) do
-                    if child.Name == "ClickPart" and child ~= clickPart and child:IsA("BasePart") then
-                        tinsert(temp, child)
+local function _removeTree(folder)
+    if not lemonTreeSet[folder] then return end
+    lemonTreeSet[folder] = nil
+    for i = #lemonTrees, 1, -1 do
+        if lemonTrees[i] == folder then
+            table.remove(lemonTrees, i)
+            break
+        end
+    end
+end
+
+local function addLemonTree(tree)
+    if not tree or lemonTreeSet[tree] then return end
+    lemonTreeSet[tree] = true
+    tinsert(lemonTrees, tree)
+    pcall_(function()
+        tree.AncestryChanged:Connect(function(_, parent)
+            if not parent then _removeTree(tree) end
+        end)
+    end)
+end
+
+local function hookTreesFolder(treesFolder)
+    if not treesFolder then return end
+    for _, t in ipairs_(treesFolder:GetChildren()) do
+        addLemonTree(t)
+    end
+    pcall_(function()
+        treesFolder.ChildAdded:Connect(function(newTree)
+            addLemonTree(newTree)
+        end)
+    end)
+end
+
+local function hookTycoonForTrees(tycoon)
+    if not tycoon or not tycoon.Name then return end
+    if not tycoon.Name:find("Tycoon") then return end
+    local constant = tycoon:FindFirstChild("Constant")
+    if constant then
+        local trees = constant:FindFirstChild("Trees")
+        if trees then hookTreesFolder(trees) end
+        pcall_(function()
+            constant.ChildAdded:Connect(function(child)
+                if child.Name == "Trees" then hookTreesFolder(child) end
+            end)
+        end)
+    end
+    pcall_(function()
+        tycoon.ChildAdded:Connect(function(child)
+            if child.Name == "Constant" then
+                local trees = child:FindFirstChild("Trees")
+                if trees then hookTreesFolder(trees) end
+                pcall_(function()
+                    child.ChildAdded:Connect(function(c2)
+                        if c2.Name == "Trees" then hookTreesFolder(c2) end
+                    end)
+                end)
+            end
+        end)
+    end)
+end
+
+local function buildLemonTreeCache()
+    lemonTrees, lemonTreeSet = {}, {}
+
+    -- (1) LemonTree directo en Workspace
+    local rootLT = Workspace:FindFirstChild("LemonTree")
+    if rootLT then addLemonTree(rootLT) end
+    pcall_(function()
+        Workspace.ChildAdded:Connect(function(child)
+            if child.Name == "LemonTree" then
+                addLemonTree(child)
+            elseif child.Name and child.Name:find("Tycoon") then
+                hookTycoonForTrees(child)
+            end
+        end)
+    end)
+
+    -- (2) Cada Tycoon -> Constant -> Trees
+    for _, tycoon in ipairs_(Workspace:GetChildren()) do
+        hookTycoonForTrees(tycoon)
+    end
+
+    lemonTreeCacheReady = true
+end
+
+buildLemonTreeCache()
+
+local LEMON_MAX_FRUIT_HEIGHT = 14  -- Frutas con Y > esto se ignoran (atascadas)
+
+local function getLemonsFast()
+    if not lemonTreeCacheReady then buildLemonTreeCache() end
+    local temp = {}
+    local trees = lemonTrees
+    for ti = 1, #trees do
+        local tree = trees[ti]
+        if tree and tree.Parent then
+            for _, fruit in ipairs_(tree:GetChildren()) do
+                if fruit.Name == "Fruit" then
+                    local clickPart = fruit:FindFirstChild("ClickPart")
+                    if clickPart and clickPart:IsA("BasePart")
+                       and clickPart.Position.Y <= LEMON_MAX_FRUIT_HEIGHT then
+                        tinsert(temp, clickPart)
                     end
                 end
             end
         end
     end
-
-    -- (1) LemonTree directo en Workspace (game.Workspace.LemonTree.Fruit)
-    local rootLemonTree = Workspace:FindFirstChild("LemonTree")
-    if rootLemonTree then
-        harvestLemonTree(rootLemonTree)
-    end
-
-    -- (2) LemonTree dentro de cada Tycoon (Tycoon → Constant → Trees → LemonTree)
-    for _, tycoon in ipairs_(Workspace:GetChildren()) do
-        if tycoon.Name:find("Tycoon") then
-            local constant = tycoon:FindFirstChild("Constant")
-            if not constant then continue end
-            local trees = constant:FindFirstChild("Trees")
-            if not trees then continue end
-            local lemonTree = trees:FindFirstChild("LemonTree")
-            if not lemonTree then continue end
-
-            harvestLemonTree(lemonTree)
-        end
-    end
-
     return temp
 end
 
@@ -294,6 +441,14 @@ local queueLock    = false
 local totalBought  = 0
 local totalFailed  = 0
 local lastResetTime = 0
+
+-- === TUNING DEL CHORRO CONTINUO ===
+-- El worker compra rapido; si el coord se duerme 0.5s, la cola se vacia.
+-- Estos parametros mantienen el buffer SIEMPRE lleno para que nunca espere.
+local QUEUE_TARGET_BUFFER = 40   -- buffer objetivo (items disponibles tras refill)
+local QUEUE_REFILL_AT     = 25   -- si la cola baja de esto, el Coord rellena YA
+local QUEUE_WORKER_TOPUP  = 15   -- el worker tambien se auto-rellena bajo este nivel
+local QUEUE_COORD_TICK    = 0.05 -- el coord vigila cada 50ms (antes 500ms)
 
 local function appendNewButtons()
     while queueLock do task_wait(0.001) end
@@ -375,6 +530,947 @@ local function cleanupQueue()
     queueLock = false
 end
 
+
+-- ==================== AUTO STAND (TP a Purchases/* y spam E) ====================
+-- Cuando todos los botones de TP estan "muertos" (sin botones disponibles o todos
+-- fallaron/blackliisted), entramos a esta rutina: TPea al HRP a cada Model dentro
+-- de myTycoon.Purchases en orden (oldest first = orden de hijos), mantiene apretado
+-- E 10 veces para mejorar stands, y entre cada stand re-escanea botones. Si aparece
+-- alguno nuevo, sale del modo stand y vuelve a la cola de botones.
+
+local STAND_KEY            = 0x45             -- Windows VK_E. NO usar Enum.KeyCode.E: en Matcha resuelve a 5 (XBUTTON1).
+local STAND_PRESSES        = 1                -- E por stand (1 = tap instantaneo, como un click)
+local STAND_TP_SETTLE      = 0.05             -- espera tras TP antes de tapear E
+local STAND_CYCLE_PAUSE    = 0.02             -- pausa entre stands
+local STAND_TP_Y_OFFSET    = 3                -- studs arriba del modelo
+local STAND_RECHECK_EVERY  = 1                -- cada N stands re-escanea botones
+local STAND_FOLDER_PREFIX  = "Lemon"           -- solo folders que empiecen asi (case-insensitive). "" = todos.
+local STAND_LOOP_DELAY     = 0.1              -- delay entre pasadas completas
+-- Price gating: solo TPea al stand si su precio (PlayerGui.<standName>.Upgrade.Price)
+-- es <= a leaderstats.Cash. Si no encuentra el GUI/Price, igual va (failsafe).
+local STAND_USE_PRICE_GATE = true
+local STAND_REQUIRE_PRICE  = true                   -- true = si no hay GUI/Price, SKIP (no TP)
+local STAND_PRICE_PATH     = {"Upgrade", "Price"}  -- ruta relativa al GUI del stand
+
+-- Encuentra una posicion "TPeable" para un Model. Devuelve Vector3 o nil.
+local function _modelPivotPos(model)
+    -- 1) PrimaryPart
+    local pp = nil
+    pcall_(function() pp = model.PrimaryPart end)
+    if pp then
+        local p; pcall_(function() p = pp.Position end)
+        if p then return p end
+    end
+    -- 2) Model:GetPivot() si existe
+    local piv
+    pcall_(function() piv = model:GetPivot() end)
+    if piv then
+        local p; pcall_(function() p = piv.Position end)
+        if p then return p end
+    end
+    -- 3) Primer BasePart descendiente
+    local desc; pcall_(function() desc = model:GetDescendants() end)
+    if desc then
+        for _, d in ipairs_(desc) do
+            local ok, isBase = pcall_(function() return d:IsA("BasePart") end)
+            if ok and isBase then
+                local p; pcall_(function() p = d.Position end)
+                if p then return p end
+            end
+        end
+    end
+    -- 4) GetBoundingBox
+    local cf
+    pcall_(function() cf = model:GetBoundingBox() end)
+    if cf then
+        local p; pcall_(function() p = cf.Position end)
+        if p then return p end
+    end
+    return nil
+end
+
+-- Detecta el "placeholder" que existe ANTES de comprar el stand:
+-- el folder tiene un Model con el mismo nombre, y ese Model solo contiene
+-- UN BasePart (tipicamente con su mismo nombre). Cuando el stand existe
+-- de verdad, el Model tiene mas hijos (Models internos, multiples Parts,
+-- attachments, scripts, etc).
+local function _isPlaceholderModel(model)
+    if not model then return true end
+    local kids; pcall_(function() kids = model:GetChildren() end)
+    if not kids or #kids == 0 then return true end
+    if #kids > 1 then return false end
+    local c = kids[1]
+    -- 1 hijo BasePart con el MISMO NOMBRE que el Model -> placeholder clasico.
+    -- La carpeta y el Model SIEMPRE existen aunque el stand no haya sido comprado;
+    -- lo que distingue un stand "vacio" es que su Model solo tiene UN Part con
+    -- exactamente el mismo nombre. Skip inmediato, sin price-gate ni TP.
+    local okBase, isBase = pcall_(function() return c:IsA("BasePart") end)
+    if okBase and isBase then
+        local sameName = false
+        pcall_(function() sameName = (c.Name == model.Name) end)
+        if sameName then return true end   -- <-- placeholder confirmado
+        -- Part con nombre DISTINTO: stand real con un solo Part, NO skippear
+        return false
+    end
+    -- 1 hijo Model -> verificar recursivo (wrappers anidados)
+    local okMdl, isMdl = pcall_(function() return c:IsA("Model") end)
+    if okMdl and isMdl then return _isPlaceholderModel(c) end
+    -- 1 hijo de otra clase (Folder, Configuration, etc.) -> tampoco es stand real
+    return true
+end
+
+-- Para cada subfolder de Purchases devuelve un Model "principal" del stand.
+-- Filtra placeholders (stands que aun no se compraron).
+local function _findStandModel(folder)
+    -- 1) Hijo directo Model con mismo nombre que el folder
+    local kids; pcall_(function() kids = folder:GetChildren() end)
+    if kids then
+        for _, c in ipairs_(kids) do
+            local ok, isModel = pcall_(function() return c:IsA("Model") end)
+            if ok and isModel and c.Name == folder.Name then
+                if not _isPlaceholderModel(c) then return c end
+            end
+        end
+        -- 2) Cualquier hijo directo Model (no placeholder)
+        for _, c in ipairs_(kids) do
+            local ok, isModel = pcall_(function() return c:IsA("Model") end)
+            if ok and isModel and not _isPlaceholderModel(c) then return c end
+        end
+    end
+    -- 3) Descendiente Model con PrimaryPart (no placeholder)
+    local desc; pcall_(function() desc = folder:GetDescendants() end)
+    if desc then
+        for _, d in ipairs_(desc) do
+            local ok, isModel = pcall_(function() return d:IsA("Model") end)
+            if ok and isModel then
+                local pp; pcall_(function() pp = d.PrimaryPart end)
+                if pp and not _isPlaceholderModel(d) then return d end
+            end
+        end
+    end
+    return nil
+end
+
+-- Lista ordenada {folder, model, pos} de stands TPeables.
+-- Filtra folders por STAND_FOLDER_PREFIX (case-insensitive). "" = todos.
+local function getStandTargets(verbose)
+    local out = {}
+    if not myTycoon then
+        if verbose then print("[Stand] myTycoon nil") end
+        return out
+    end
+    local purchases
+    pcall_(function() purchases = myTycoon:FindFirstChild("Purchases") end)
+    if not purchases then
+        if verbose then print("[Stand] Purchases folder no encontrado en " .. tostring(myTycoon:GetFullName())) end
+        return out
+    end
+    local kids; pcall_(function() kids = purchases:GetChildren() end)
+    if not kids then return out end
+    local prefix = (STAND_FOLDER_PREFIX or ""):lower()
+    local skipped, noModel, noPos = 0, 0, 0
+    for _, folder in ipairs_(kids) do
+        local nm = tostring(folder.Name)
+        if prefix ~= "" and nm:lower():sub(1, #prefix) ~= prefix then
+            skipped = skipped + 1
+        else
+            local model = _findStandModel(folder)
+            if not model then
+                noModel = noModel + 1
+                if verbose then print("[Stand]   " .. nm .. " -> sin Model") end
+            else
+                local pos = _modelPivotPos(model)
+                if not pos then
+                    noPos = noPos + 1
+                    if verbose then print("[Stand]   " .. nm .. " -> Model sin pos") end
+                else
+                    tinsert(out, {folder = folder, model = model, pos = pos, name = nm})
+                end
+            end
+        end
+    end
+    if verbose then
+        print(string.format("[Stand] Purchases hijos=%d  match-prefix=%d  no-model=%d  no-pos=%d  validos=%d",
+            #kids, #kids - skipped, noModel, noPos, #out))
+    end
+    return out
+end
+
+local function _tpHrpTo(pos)
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local ok = pcall_(function()
+        hrp.CFrame = CF(pos.X, pos.Y + STAND_TP_Y_OFFSET, pos.Z)
+    end)
+    return ok
+end
+
+local function _windowFocused()
+    if type(isrbxactive) ~= "function" then return true end
+    local ok, r = pcall_(isrbxactive)
+    if not ok then return true end
+    return r ~= false
+end
+
+-- ===== Price gate helpers =====
+-- Convierte un texto de precio a numero. Soporta sufijos K/M/B/T y separadores.
+local function _parsePriceText(s)
+    if not s then return nil end
+    s = tostring(s):gsub("%s", "")
+    -- quitar simbolos comunes ($, comas, etc) pero conservar dot, digits y sufijo
+    local cleaned = s:gsub("[^%d%.kKmMbBtT]", "")
+    if cleaned == "" then return nil end
+    local mult = 1
+    local last = cleaned:sub(-1):lower()
+    if last == "k" then mult = 1e3
+    elseif last == "m" then mult = 1e6
+    elseif last == "b" then mult = 1e9
+    elseif last == "t" then mult = 1e12 end
+    if mult ~= 1 then cleaned = cleaned:sub(1, -2) end
+    local n = tonumber(cleaned)
+    if not n then return nil end
+    return n * mult
+end
+
+local function _getCash()
+    local ls; pcall_(function() ls = player:FindFirstChild("leaderstats") end)
+    if not ls then return nil end
+    local c; pcall_(function() c = ls:FindFirstChild("Cash") end)
+    if not c then return nil end
+    local v; pcall_(function() v = c.Value end)
+    if type(v) == "number" then return v end
+    return _parsePriceText(v)
+end
+
+-- Resuelve el BillboardGui que corresponde al stand. Prueba:
+--   1) nombre exacto    ("LemonX")
+--   2) sin espacios     ("Lemon Trading" -> "LemonTrading")
+--   3) case-insensitive sobre los hijos del PlayerGui
+--   4) si standName termina en " Ground"/" Top"/etc, prueba con la raiz ("LemonX Ground" -> "LemonX")
+local function _resolveStandGui(standName)
+    local pg; pcall_(function() pg = player:FindFirstChildOfClass("PlayerGui") end)
+    if not pg then return nil end
+    -- 1) exacto
+    local g; pcall_(function() g = pg:FindFirstChild(standName) end)
+    if g then return g end
+    -- 2) sin espacios
+    local stripped = (standName or ""):gsub("%s+", "")
+    if stripped ~= standName then
+        pcall_(function() g = pg:FindFirstChild(stripped) end)
+        if g then return g end
+    end
+    -- 3) case-insensitive (mas costoso, ultimo recurso)
+    local low = stripped:lower()
+    local kids; pcall_(function() kids = pg:GetChildren() end)
+    if kids then
+        for _, c in ipairs_(kids) do
+            local nm = tostring(c.Name):gsub("%s+", ""):lower()
+            if nm == low then return c end
+        end
+    end
+    -- 4) probar con "raiz" si termina en sufijos comunes ( Ground / Top / Base / Floor )
+    for _, suf in ipairs_({" Ground", " Top", " Base", " Floor", " Roof"}) do
+        if standName:sub(-#suf):lower() == suf:lower() then
+            local root = standName:sub(1, -#suf - 1)
+            local sub = _resolveStandGui(root)
+            if sub then return sub end
+        end
+    end
+    return nil
+end
+
+-- Intenta extraer un numero de un nodo arbitrario (ValueBase, GuiText, o
+-- contenedor con descendientes). Devuelve numero o nil.
+local function _extractNumber(node)
+    if not node then return nil end
+    -- ValueBase
+    local okV, isVal = pcall_(function() return node:IsA("ValueBase") end)
+    if okV and isVal then
+        local v; pcall_(function() v = node.Value end)
+        if type(v) == "number" then return v end
+        local n = _parsePriceText(v)
+        if n then return n end
+    end
+    -- GuiText (TextLabel/TextButton/TextBox)
+    local okT, isText = pcall_(function() return node:IsA("GuiObject") and (node:IsA("TextLabel") or node:IsA("TextButton") or node:IsA("TextBox")) end)
+    if okT and isText then
+        local t; pcall_(function() t = node.Text end)
+        local n = _parsePriceText(t)
+        if n then return n end
+    end
+    return nil
+end
+
+-- Resuelve PlayerGui.<standName>[STAND_PRICE_PATH...] y devuelve numero o nil.
+-- Mucho mas tolerante: si el nodo Price no es directamente texto/valor, busca
+-- en su descendencia y prueba paths alternativos.
+local _STAND_PRICE_DIAG_SHOWN = {}
+local function _getStandPrice(standName, debugLog)
+    local gui = _resolveStandGui(standName)
+    if not gui then return nil end
+    -- (A) seguir STAND_PRICE_PATH
+    local node = gui
+    for _, segment in ipairs_(STAND_PRICE_PATH) do
+        local nxt; pcall_(function() nxt = node:FindFirstChild(segment) end)
+        node = nxt
+        if not node then break end
+    end
+    if node then
+        local n = _extractNumber(node)
+        if n then return n end
+        -- nodo existe pero no se pudo extraer: mira descendientes (1er TextLabel/ValueBase con numero)
+        local desc; pcall_(function() desc = node:GetDescendants() end)
+        if desc then
+            for _, d in ipairs_(desc) do
+                local n2 = _extractNumber(d)
+                if n2 then return n2 end
+            end
+        end
+    end
+    -- (B) paths alternativos comunes
+    local altPaths = {
+        {"Upgrade", "Cost"},
+        {"Upgrade", "Amount"},
+        {"Upgrade", "Price", "Amount"},
+        {"Upgrade", "Price", "Value"},
+        {"Cost"},
+        {"Price"},
+        {"Main", "Upgrade", "Price"},
+        {"Frame", "Upgrade", "Price"},
+    }
+    for _, p in ipairs_(altPaths) do
+        local cur = gui
+        for _, seg in ipairs_(p) do
+            local nxt; pcall_(function() nxt = cur:FindFirstChild(seg) end)
+            cur = nxt
+            if not cur then break end
+        end
+        if cur then
+            local n = _extractNumber(cur)
+            if n then return n end
+        end
+    end
+    -- (C) escaneo completo del GUI: primer TextLabel/ValueBase con numero parseable
+    local desc; pcall_(function() desc = gui:GetDescendants() end)
+    if desc then
+        for _, d in ipairs_(desc) do
+            local n = _extractNumber(d)
+            if n then return n end
+        end
+    end
+    -- Diag: imprime estructura del GUI 1 sola vez por stand
+    if debugLog and not _STAND_PRICE_DIAG_SHOWN[standName] then
+        _STAND_PRICE_DIAG_SHOWN[standName] = true
+        print("[Stand][DIAG] " .. standName .. " GUI=" .. gui:GetFullName())
+        local kids2; pcall_(function() kids2 = gui:GetDescendants() end)
+        if kids2 then
+            local shown = 0
+            for _, d in ipairs_(kids2) do
+                if shown >= 25 then break end
+                local cls; pcall_(function() cls = d.ClassName end)
+                local nm = tostring(d.Name)
+                local txt; pcall_(function() txt = d.Text end)
+                local val; pcall_(function() val = d.Value end)
+                print(sformat("  - %s  [%s]  text=%s  value=%s",
+                    nm, tostring(cls), tostring(txt), tostring(val)))
+                shown = shown + 1
+            end
+        end
+    end
+    return nil
+end
+
+-- Tap instantaneo: 1 click (press + release casi en el mismo frame).
+local function _tapKeyOnce(key)
+    if not _windowFocused() then return false end
+    pcall_(function() keypress(key) end)
+    task_wait()  -- 1 frame para que el juego registre el press antes del release
+    pcall_(function() keyrelease(key) end)
+    return true
+end
+
+-- ===== E spam (legacy, queda disponible si subis STAND_PRESSES > 1) =====
+local STAND_PRESS_HOLD = 0   -- 0 = yield 1 frame; >0 = task_wait(seg) entre press y release
+local function _pressKeyMany(key, n)
+    for i = 1, n do
+        if not autoStandActive then return false end
+        if not _windowFocused() then
+            task_wait(0.2)
+            return false
+        end
+        pcall_(function() keypress(key) end)
+        if STAND_PRESS_HOLD > 0 then
+            task_wait(STAND_PRESS_HOLD)
+        else
+            task_wait()  -- 1 frame, lo minimo para que Matcha flushee el press
+        end
+        pcall_(function() keyrelease(key) end)
+        -- NO hay yield aqui: el siguiente keypress entra de inmediato y
+        -- Matcha agrupa (release_i + press_{i+1}) en el mismo flush.
+    end
+    return true
+end
+
+-- Devuelve true si hay al menos un boton de TP "vivo" (no failed/blackliisted/greyed).
+local function _anyLiveButtons()
+    local buttons = getButtonsRealTime()
+    if #buttons == 0 then return false end
+    for _, v in ipairs_(buttons) do
+        local key = getButtonKey(v)
+        if key then
+            local fails = failedButtons[key] or 0
+            if fails < 2 and not buyBlacklist[key] and not isGreyedOut(v) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- ==================== AUTO STAND - MANAGE+TP HYBRID MODE ====================
+-- Modo hibrido: usamos el ManageMenu solo como FILTRO (saber cuales stands
+-- estan desbloqueados Y cuales se pueden pagar mirando el estado del boton
+-- Upgrade). Para los activos hacemos el TP+spam E clasico que ya funciona.
+local STAND_MODE = "manage"   -- "manage" = filtro Manage + TP+E, "tp" = legacy
+local STAND_MANAGE_PATH = {"Manage", "ManageMenu", "Body", "Frame", "Manage"}
+local STAND_MANAGE_BLANK_PREFIX = "Blank"
+local STAND_MANAGE_CLICK_DELAY  = 0.05  -- seg entre stands
+
+-- Cuanto tiempo spamear E sobre un stand activo, y a que ritmo:
+-- v5.17.0: subido a 1.5s porque la cadencia nueva da ~28 presses/seg
+-- (1.5s * 28 = ~42 activaciones por stand, antes ~15 con 1.0s a ~15/seg)
+local STAND_E_SPAM_DURATION = 1.5    -- segundos por stand
+local STAND_E_SPAM_INTERVAL = 0.018  -- gap entre taps (legacy; el path optimo lo ignora)
+
+-- Detecta el ScrollingFrame ancestro mas cercano de un GuiObject.
+local function _findScrollAncestor(obj)
+    local cur = obj
+    while cur and cur.Parent do
+        cur = cur.Parent
+        local ok, isScroll = pcall_(function() return cur:IsA("ScrollingFrame") end)
+        if ok and isScroll then return cur end
+        if cur:IsA("ScreenGui") then break end
+    end
+    return nil
+end
+
+-- Ajusta CanvasPosition.Y del ScrollingFrame para que `child` quede DENTRO del
+-- viewport visible. Despues yield-ea para que el render se actualice.
+local function _ensureVisibleInScroll(child)
+    if not child or not child.Parent then return false end
+    local sf = _findScrollAncestor(child)
+    if not sf then return true end  -- no hay scroll, ya esta visible
+    local ok, err = pcall_(function()
+        local childY    = child.AbsolutePosition.Y
+        local sfY       = sf.AbsolutePosition.Y
+        local viewportH = sf.AbsoluteWindowSize.Y
+        local childH    = child.AbsoluteSize.Y
+        local relTop    = childY - sfY                  -- posicion del top del child relativa al viewport
+        local relBot    = relTop + childH               -- bottom relativo
+        local cur       = sf.CanvasPosition
+        if relTop < 0 then
+            -- arriba del viewport -> scroll up
+            sf.CanvasPosition = Vec2(cur.X, math.max(0, cur.Y + relTop - 4))
+        elseif relBot > viewportH then
+            -- abajo del viewport -> scroll down
+            sf.CanvasPosition = Vec2(cur.X, cur.Y + (relBot - viewportH) + 4)
+        end
+    end)
+    task_wait() ; task_wait()  -- 2 frames para que se renderice
+    return ok
+end
+
+-- ===== Deteccion ACTIVO/INACTIVO via memoria (Matcha) =====
+-- Matcha bloquea el acceso por __index a las propiedades visuales de los GUI
+-- (BackgroundColor3 etc. devuelven nil). Pero expone `memory_read` y `obj.Address`,
+-- asi que leemos el BackgroundColor3 del ImageButton directamente de memoria.
+-- Offset descubierto por BruteForceColor (ver doc Matcha): 0x540 (1344).
+local GUI_BG_COLOR_OFFSET = 0x540
+
+-- Color del estado INACTIVO/gris que el juego muestra cuando no se puede pagar.
+-- El AZUL/activo varia mas (cyan, magenta segun stand), por eso decidimos por
+-- distancia al gris: si esta cerca del gris -> inactivo; cualquier otra cosa -> activo.
+local STAND_INACTIVE_RGB    = {0.49, 0.49, 0.49}   -- ~125/255 cada canal
+local STAND_COLOR_TOLERANCE = 0.06                  -- tolerancia por canal
+
+local function _readGuiBgColor(guiObject)
+    if not guiObject then return nil end
+    local addr; pcall_(function() addr = tonumber(guiObject.Address) end)
+    if not addr or addr <= 4096 then return nil end
+    if type(memory_read) ~= "function" then return nil end
+    local okR, r = pcall_(memory_read, "float", addr + GUI_BG_COLOR_OFFSET)
+    if not okR then return nil end
+    local okG, g = pcall_(memory_read, "float", addr + GUI_BG_COLOR_OFFSET + 4)
+    if not okG then return nil end
+    local okB, b = pcall_(memory_read, "float", addr + GUI_BG_COLOR_OFFSET + 8)
+    if not okB then return nil end
+    if type(r) ~= "number" or type(g) ~= "number" or type(b) ~= "number" then return nil end
+    -- Sanidad: floats entre 0 y 1
+    if r < -0.01 or r > 1.01 or g < -0.01 or g > 1.01 or b < -0.01 or b > 1.01 then return nil end
+    return r, g, b
+end
+
+-- Devuelve true/false segun color. Si no pudo leer la memoria, devuelve nil
+-- (usado como senal para que runManagePass haga fallback al delta-detector).
+local function _isUpgradeActive(upg)
+    local r, g, b = _readGuiBgColor(upg)
+    if not r then return nil end
+    local tol = STAND_COLOR_TOLERANCE
+    local ir, ig, ib = STAND_INACTIVE_RGB[1], STAND_INACTIVE_RGB[2], STAND_INACTIVE_RGB[3]
+    if math.abs(r - ir) <= tol and math.abs(g - ig) <= tol and math.abs(b - ib) <= tol then
+        return false, r, g, b
+    end
+    return true, r, g, b
+end
+
+-- ===== Fallback por delta de Count/Price (si memory_read falla) =====
+local STAND_INACTIVE_RETEST_AFTER = 8
+local _standInactiveSince = {}
+
+local function _readUpgradeState(upgBtn)
+    if not upgBtn then return "" end
+    local parts = {}
+    for _, childName in ipairs_({"Count", "Price", "Stack"}) do
+        local c; pcall_(function() c = upgBtn:FindFirstChild(childName) end)
+        if c then
+            local t; pcall_(function() t = c.Text end)
+            tinsert(parts, tostring(t or ""))
+        else
+            tinsert(parts, "")
+        end
+    end
+    return table.concat(parts, "|")
+end
+
+local function _shouldSkipInactive(name)
+    local t = _standInactiveSince[name]
+    if not t then return false end
+    if (tick_() - t) > STAND_INACTIVE_RETEST_AFTER then
+        _standInactiveSince[name] = nil
+        return false
+    end
+    return true
+end
+
+local function _markInactive(name) _standInactiveSince[name] = tick_() end
+local function _markActive(name)   _standInactiveSince[name] = nil end
+
+-- Mapea "LemonTrading" (del Manage) -> folder "Lemon Trading" en Purchases.
+-- Prueba: exacto, sin espacios, normalizado (sin espacios + lowercase).
+local function _findPurchaseFolderForStand(standName)
+    if not myTycoon then return nil end
+    local purchases; pcall_(function() purchases = myTycoon:FindFirstChild("Purchases") end)
+    if not purchases then return nil end
+    -- 1) exacto
+    local f; pcall_(function() f = purchases:FindFirstChild(standName) end)
+    if f then return f end
+    -- 2) normalizado
+    local target = standName:gsub("%s+", ""):lower()
+    local kids; pcall_(function() kids = purchases:GetChildren() end)
+    if not kids then return nil end
+    for _, c in ipairs_(kids) do
+        local nm = tostring(c.Name):gsub("%s+", ""):lower()
+        if nm == target then return c end
+    end
+    return nil
+end
+
+-- Spamea la tecla `key` durante `durationSec` segundos. Sale antes si autoStand
+-- se apaga o se pierde el foco.
+-- v5.17.0: path optimizado para VK_E (0x45) con cadencia ~28 presses/seg
+-- medida en Matcha (17ms hold + 18ms gap, sin doble release, con mouse focus
+-- previo y cleanup defensivo). Para otras teclas mantiene el comportamiento
+-- original frame-por-frame.
+local function _spamKeyFor(key, durationSec, intervalSec)
+    -- ========== PATH OPTIMIZADO PARA E (DIAG v5.17.1) ==========
+    if key == 0x45 then
+        -- v5.17.3: HACEMOS MOUSE FOCUS PRIMERO, despues chequeamos foco.
+        -- Antes chequeabamos foco PRIMERO y si daba false (caso comun despues
+        -- del TP), bailabamos sin intentar restaurarlo.
+        -- Ademas usamos mousemoveabs como hace Auto Buy: sin eso el click cae
+        -- donde sea que este el cursor, posiblemente fuera del window de Roblox,
+        -- y no restaura foco.
+        local function _restoreFocus()
+            pcall_(function()
+                if camera and type(mousemoveabs) == "function" and type(mouse1press) == "function" then
+                    local vp = camera.ViewportSize
+                    if vp and vp.X > 0 and vp.Y > 0 then
+                        mousemoveabs(mfloor(vp.X * 0.5), mfloor(vp.Y * 0.5))
+                        task_wait(0.01)
+                        mouse1press()
+                        task_wait(0.02)
+                        mouse1release()
+                    end
+                end
+            end)
+        end
+
+        -- Restaurar foco antes de cualquier chequeo
+        _restoreFocus()
+        task_wait(0.03)
+
+        local _entry_focus = _windowFocused()
+        local _entry_active = autoStandActive
+        print(sformat("[E-DIAG] >>> ENTRY focus=%s autoStandActive=%s dur=%.2fs",
+            tostring(_entry_focus), tostring(_entry_active), durationSec or 0))
+
+        if not _entry_focus then
+            -- Segundo intento: el primer click puede haber sido en una zona muerta
+            _restoreFocus()
+            task_wait(0.05)
+            _entry_focus = _windowFocused()
+            print(sformat("[E-DIAG] retry focus after 2nd click: %s", tostring(_entry_focus)))
+            if not _entry_focus then
+                print("[E-DIAG] BAIL entry: window not focused (isrbxactive=false)")
+                task_wait(0.2)
+                return false
+            end
+        end
+        -- 1) Cleanup previo
+        for i = 1, 2 do
+            pcall_(function() keyrelease(0x45) end)
+            task_wait(0.012)
+        end
+
+        local _post_mouse_focus = _windowFocused()
+        print(sformat("[E-DIAG] post-mouse-click focus=%s", tostring(_post_mouse_focus)))
+
+        -- 2) Spam loop con logging
+        local t0 = tick_()
+        local cycles = 0
+        local exit_reason = "duration_completed"
+
+        while true do
+            if not autoStandActive then
+                exit_reason = sformat("autoStandActive=false at cycle %d", cycles)
+                break
+            end
+            local elapsed = tick_() - t0
+            if elapsed >= durationSec then
+                break
+            end
+            if not _windowFocused() then
+                exit_reason = sformat("focus_lost at cycle %d t=%.3fs", cycles, elapsed)
+                pcall_(function() keyrelease(0x45) end)
+                break
+            end
+            pcall_(function() keypress(0x45) end)
+            task_wait(0.017)
+            pcall_(function() keyrelease(0x45) end)
+            task_wait(0.018)
+            cycles = cycles + 1
+        end
+
+        pcall_(function() keyrelease(0x45) end)
+        print(sformat("[E-DIAG] <<< EXIT cycles=%d reason=%s elapsed=%.3fs",
+            cycles, exit_reason, tick_() - t0))
+        return true
+    end
+
+    -- ========== PATH ORIGINAL PARA OTRAS TECLAS ==========
+    local t0 = tick_()
+    while autoStandActive and (tick_() - t0) < durationSec do
+        if not _windowFocused() then
+            task_wait(0.2)
+            return false
+        end
+        pcall_(function() keypress(key) end)
+        task_wait()  -- 1 frame
+        pcall_(function() keyrelease(key) end)
+        if intervalSec and intervalSec > 0 then
+            task_wait(intervalSec)
+        else
+            task_wait()
+        end
+    end
+    return true
+end
+
+-- Click programatico via mouse virtual (no requiere hooks).
+-- Devuelve true si pudo disparar el click, false si no.
+local function _clickGuiButton(btn)
+    if not btn or not btn.Parent then return false, "sin parent" end
+    -- Si el boton esta desactivado por el juego (Active=false), no clickear.
+    local active = true
+    pcall_(function() active = btn.Active end)
+    if active == false then return false, "Active=false" end
+    -- Calcular centro absoluto
+    local pos, size
+    pcall_(function() pos, size = btn.AbsolutePosition, btn.AbsoluteSize end)
+    if not pos or not size or size.X <= 0 or size.Y <= 0 then
+        return false, "sin AbsoluteSize"
+    end
+    -- Si esta dentro de un ScrollingFrame, asegurar visibilidad primero
+    _ensureVisibleInScroll(btn)
+    -- Re-leer posicion despues del scroll
+    pcall_(function() pos, size = btn.AbsolutePosition, btn.AbsoluteSize end)
+    local cx = pos.X + size.X * 0.5
+    local cy = pos.Y + size.Y * 0.5
+    -- Check basico: dentro de la pantalla
+    local viewport = camera and camera.ViewportSize
+    if viewport and (cx < 0 or cy < 0 or cx > viewport.X or cy > viewport.Y) then
+        return false, sformat("fuera de pantalla (%d,%d)", cx, cy)
+    end
+    if type(mousemoveabs) ~= "function" or type(mouse1press) ~= "function"
+       or type(mouse1release) ~= "function" then
+        return false, "sin mouse API"
+    end
+    if not _windowFocused() then return false, "window sin foco" end
+    -- Mover, esperar 1 frame, press + 1 frame + release
+    pcall_(function() mousemoveabs(cx, cy) end)
+    task_wait()
+    pcall_(function() mouse1press() end)
+    task_wait()
+    pcall_(function() mouse1release() end)
+    return true, sformat("%d,%d", cx, cy)
+end
+
+local function _getManageRoot()
+    local pg; pcall_(function() pg = player:FindFirstChildOfClass("PlayerGui") end)
+    if not pg then return nil end
+    local node = pg
+    for _, seg in ipairs_(STAND_MANAGE_PATH) do
+        local nxt; pcall_(function() nxt = node:FindFirstChild(seg) end)
+        if not nxt then return nil end
+        node = nxt
+    end
+    return node
+end
+
+-- Devuelve lista {frame, upgrade, name, priceText} de stands desbloqueados.
+-- Skippea Blank* (slots vacios) y todo lo que no tenga Upgrade GuiButton.
+local function _getManageStands()
+    local out = {}
+    local root = _getManageRoot()
+    if not root then return out end
+    local kids; pcall_(function() kids = root:GetChildren() end)
+    if not kids then return out end
+    for _, c in ipairs_(kids) do
+        local okF, isFrame = pcall_(function() return c:IsA("Frame") end)
+        if okF and isFrame then
+            local nm = tostring(c.Name)
+            if nm:sub(1, #STAND_MANAGE_BLANK_PREFIX) ~= STAND_MANAGE_BLANK_PREFIX then
+                local upg; pcall_(function() upg = c:FindFirstChild("Upgrade") end)
+                if upg then
+                    local okBtn, isBtn = pcall_(function() return upg:IsA("GuiButton") end)
+                    if okBtn and isBtn then
+                        local priceLbl; pcall_(function() priceLbl = upg:FindFirstChild("Price") end)
+                        local priceText = nil
+                        if priceLbl then pcall_(function() priceText = priceLbl.Text end) end
+                        tinsert(out, {frame=c, upgrade=upg, name=nm, priceText=priceText})
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- Click programatico sobre un GuiButton. Combina:
+--  (a) firesignal sobre Activated y MouseButton1Click (si el ejecutor lo expone)
+--  (b) VirtualInputManager:SendMouseButtonEvent en el centro absoluto del boton
+local function _clickGuiButton(btn)
+    if not btn or not btn.Parent then return false end
+    local fired = false
+    if type(firesignal) == "function" then
+        pcall_(function()
+            if btn.Activated then
+                firesignal(btn.Activated, Enum.UserInputType.MouseButton1)
+                fired = true
+            end
+        end)
+        pcall_(function()
+            if btn.MouseButton1Click then
+                firesignal(btn.MouseButton1Click)
+                fired = true
+            end
+        end)
+    end
+    if VIM_svc then
+        local pos, size
+        pcall_(function() pos, size = btn.AbsolutePosition, btn.AbsoluteSize end)
+        if pos and size and size.X > 0 and size.Y > 0 then
+            local cx = pos.X + size.X * 0.5
+            local cy = pos.Y + size.Y * 0.5
+            pcall_(function()
+                VIM_svc:SendMouseButtonEvent(cx, cy, 0, true,  game, 0)
+                VIM_svc:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+                fired = true
+            end)
+        end
+    end
+    return fired
+end
+
+-- Una pasada por todos los stands del ManageMenu (modo hibrido).
+-- 1) Lee BackgroundColor3 por memoria (memory_read addr+0x540).
+--    Gris ~(0.49,0.49,0.49) -> INACTIVO, skip sin TP.
+--    Cualquier otro color  -> ACTIVO, TP + spam E.
+-- 2) Si memory_read no funciona para ese boton, fallback al delta detector
+--    (compara Count/Price antes y despues; cachea inactivos 8s).
+local function runManagePass(verbose)
+    local stands = _getManageStands()
+    if #stands == 0 then
+        if verbose then
+            print("[Stand][Manage+TP] Manage no encontrado o vacio. Abri el menu Manage al menos una vez.")
+        end
+        return "done"
+    end
+    print(sformat("[Stand][Manage+TP] Pasada start, %d desbloqueados", #stands))
+    local tapped, skipped_color, skipped_cache, fallback_used = 0, 0, 0, 0
+    for i, s in ipairs_(stands) do
+        -- v5.17.3: solo chequeamos autoStandActive. Antes pedia tambien
+        -- autoBuyActive, lo que hacia que runManagePass se ejecutara y saliera
+        -- silenciosamente cuando AutoBuy estaba OFF -> 1111 "Pasada start" sin
+        -- "Pasada end" y un loop al 20Hz. El gating con AutoBuy ya lo hace el
+        -- driver exterior (linea ~2040: if autoBuyActive and _anyLiveButtons()).
+        if not autoStandActive then return "off" end
+        if (i - 1) % STAND_RECHECK_EVERY == 0 then
+            if _anyLiveButtons() then
+                print("[Stand][Manage+TP] Boton vivo detectado, saliendo")
+                return "buttons"
+            end
+        end
+        -- (A) Chequeo por color via memoria
+        local active, cr, cg, cb = _isUpgradeActive(s.upgrade)
+        if active == false then
+            skipped_color = skipped_color + 1
+            if verbose then
+                print(sformat("[Stand][Manage+TP] [%d/%d] %s -> INACTIVO (gris %.2f,%.2f,%.2f)",
+                    i, #stands, tostring(s.name), cr or 0, cg or 0, cb or 0))
+            end
+            task_wait(0.005)
+            continue
+        end
+        -- (B) Si pudimos leer color y es ACTIVO -> TP+E directo
+        -- (C) Si no pudimos leer color (active == nil) -> fallback delta con cache 8s
+        local useFallback = (active == nil)
+        if useFallback then
+            fallback_used = fallback_used + 1
+            if _shouldSkipInactive(s.name) then
+                skipped_cache = skipped_cache + 1
+                task_wait(0.005)
+                continue
+            end
+        end
+        -- Resolver folder/modelo/pos
+        local folder = _findPurchaseFolderForStand(s.name)
+        if not folder then
+            print(sformat("[Stand][Manage+TP] [%d/%d] %s -> no Purchases match",
+                i, #stands, tostring(s.name)))
+            task_wait(STAND_CYCLE_PAUSE)
+            continue
+        end
+        local model = _findStandModel(folder)
+        local pos   = model and _modelPivotPos(model) or nil
+        if not pos then
+            print(sformat("[Stand][Manage+TP] [%d/%d] %s -> sin pos TPeable",
+                i, #stands, tostring(s.name)))
+            task_wait(STAND_CYCLE_PAUSE)
+            continue
+        end
+        -- Estado antes (solo si usamos fallback)
+        local before = useFallback and _readUpgradeState(s.upgrade) or nil
+        -- TP + spam E
+        if not _tpHrpTo(pos) then
+            print(sformat("[Stand][Manage+TP] [%d/%d] %s -> TP fallo",
+                i, #stands, tostring(s.name)))
+            task_wait(STAND_CYCLE_PAUSE)
+            continue
+        end
+        task_wait(STAND_TP_SETTLE)
+        _spamKeyFor(STAND_KEY, STAND_E_SPAM_DURATION, STAND_E_SPAM_INTERVAL)
+        tapped = tapped + 1
+        if useFallback then
+            local after = _readUpgradeState(s.upgrade)
+            if before == after then
+                _markInactive(s.name)
+                print(sformat("[Stand][Manage+TP] [%d/%d] %s -> [fallback] sin cambio, INACTIVO %ds",
+                    i, #stands, tostring(s.name), STAND_INACTIVE_RETEST_AFTER))
+            else
+                _markActive(s.name)
+                print(sformat("[Stand][Manage+TP] [%d/%d] %s -> [fallback] COMPRO! (%s->%s)",
+                    i, #stands, tostring(s.name), tostring(before), tostring(after)))
+            end
+        else
+            print(sformat("[Stand][Manage+TP] [%d/%d] %s -> ACTIVO TP+E %.1fs (color %.2f,%.2f,%.2f)",
+                i, #stands, tostring(s.name), STAND_E_SPAM_DURATION, cr or 0, cg or 0, cb or 0))
+        end
+        task_wait(STAND_CYCLE_PAUSE)
+    end
+    print(sformat("[Stand][Manage+TP] Pasada end. tap=%d skip_color=%d skip_cache=%d fallback=%d",
+        tapped, skipped_color, skipped_cache, fallback_used))
+    return "done"
+end
+
+-- Una pasada por todos los stands. Devuelve "buttons" si reaparecio uno,
+-- "off" si el usuario apago, "done" si termino la pasada sin novedades.
+local function runStandPass(verbose)
+    local targets = getStandTargets(verbose)
+    if #targets == 0 then return "done" end
+    -- Leer cash una vez por pasada (se re-lee si una compra cambia el monto;
+    -- ojo: si el upgrade restara cash, conviene re-leerlo entre stands).
+    local cash = STAND_USE_PRICE_GATE and _getCash() or nil
+    print(string.format("[Stand] Pasada start, %d stands  cash=%s",
+        #targets, tostring(cash)))
+    local skipped_price, tapped = 0, 0
+    for i, t in ipairs_(targets) do
+        -- v5.17.3: igual que el Manage pass, no requerimos autoBuyActive aca.
+        -- El driver exterior ya gatea con Auto Buy live buttons.
+        if not autoStandActive then return "off" end
+        -- Re-check botones cada STAND_RECHECK_EVERY stands
+        if (i - 1) % STAND_RECHECK_EVERY == 0 then
+            -- v5.17.4: igual que Manage pass, checkear solo si AutoBuy activo.
+            if autoBuyActive and _anyLiveButtons() then
+                print("[Stand] Boton vivo detectado, saliendo del modo stand")
+                return "buttons"
+            end
+        end
+        -- Price gating fail-closed: si no hay GUI/Price o cash < price -> SKIP.
+        -- Si STAND_REQUIRE_PRICE=false, sin GUI/Price igual TPea (modo permisivo).
+        if STAND_USE_PRICE_GATE then
+            local gui = _resolveStandGui(t.name)
+            local price = _getStandPrice(t.name, true)
+            cash = _getCash() or cash
+            local reason = nil
+            if not gui then
+                if STAND_REQUIRE_PRICE then reason = "no GUI en PlayerGui" end
+            elseif not price then
+                if STAND_REQUIRE_PRICE then reason = "no price parseable" end
+            elseif not cash then
+                reason = "no leaderstats.Cash"
+            elseif cash < price then
+                reason = sformat("precio=%s > cash=%s", tostring(price), tostring(cash))
+            end
+            if reason then
+                skipped_price = skipped_price + 1
+                print(sformat("[Stand] [%d/%d] %s -> SKIP (%s)",
+                    i, #targets, tostring(t.name), reason))
+                task_wait(STAND_CYCLE_PAUSE)
+                continue
+            end
+        end
+        -- TP + tap E (instantaneo)
+        if _tpHrpTo(t.pos) then
+            task_wait(STAND_TP_SETTLE)
+            if STAND_PRESSES <= 1 then
+                _tapKeyOnce(STAND_KEY)
+            else
+                _pressKeyMany(STAND_KEY, STAND_PRESSES)
+            end
+            tapped = tapped + 1
+            print(string.format("[Stand] [%d/%d] %s -> E tap",
+                i, #targets, tostring(t.name)))
+        else
+            print("[Stand] [" .. tostring(i) .. "/" .. #targets .. "] TP fallo en " .. tostring(t.name))
+        end
+        task_wait(STAND_CYCLE_PAUSE)
+    end
+    print(string.format("[Stand] Pasada end. tap=%d  skip_precio=%d", tapped, skipped_price))
+    return "done"
+end
+
 -- Worker único y rápido
 task_spawn(function()
     local emptyStreak = 0
@@ -411,7 +1507,9 @@ task_spawn(function()
 
         if not item then
             local remaining = #lq - queueIndex + 1
-            if remaining <= 2 then
+            -- Solo auto-refill cuando la cola esta de verdad vacia.
+            -- Si todavia hay items, ChildAdded ira llenando solo.
+            if remaining <= 0 then
                 local added = appendNewButtons()
                 if added > 0 then
                     print("[Worker] Appended: +" .. added)
@@ -514,14 +1612,39 @@ task_spawn(function()
         end
 
         local remaining = #localQueue - queueIndex + 1
-        if remaining < 3 then
+        -- Scan solo cuando la cola esta VACIA o todos los botones estan muertos.
+        -- El resto del tiempo, ChildAdded alimenta la cola via eventos.
+        if remaining == 0 then
             local added = appendNewButtons()
             if added > 0 then
-                print("[Coord] Appended: " .. added)
+                print("[Coord] Refill on empty: " .. added)
+                task_wait(0.05)
+            elseif allButtonsDead() then
+                -- v5.17.2: rate-limit el "All dead -> reset" igual que hace el Worker.
+                -- Antes spineaba a 20Hz y se comia el scheduler entero, matando
+                -- task_wait dentro del spam de E (que retornaba 500ms+ en vez de 17ms).
+                local now = tick_()
+                if now - lastResetTime > 2 then
+                    lastResetTime = now
+                    print("[Coord] All dead -> reset + scan")
+                    resetBuyBlacklist()
+                    localQueue = {}
+                    queueIndex = 1
+                    appendNewButtons()
+                    task_wait(0.05)
+                else
+                    -- Reset reciente, esperar a que se libere la ventana de 2s
+                    task_wait(0.5)
+                end
+            else
+                -- Nada que agregar y no estan todos muertos: hay algo en vuelo,
+                -- backoff para no spinear el chequeo.
+                task_wait(0.3)
             end
+            continue
         end
 
-        task_wait(0.5)
+        task_wait(0.3)
     end
 end)
 
@@ -537,33 +1660,61 @@ local LEMON_MAX_PASSES = 6   -- tope de re-escaneos por ciclo (seguridad)
 local LEMON_HITBOX_ENABLED = true
 local LEMON_HITBOX_SIZE    = Vec3(50, 50, 50)   -- 50x50x50 studs (ajustable)
 
+-- ====== TUNING DE VELOCIDAD (bajalos si quieres mas velocidad) ======
+local LEMON_TP_WAIT      = 0.008  -- espera tras teleport
+local LEMON_CAM_WAIT     = 0.008  -- espera tras lookAt
+local LEMON_CLICK_GAP    = 0.005  -- entre el 1er y 2do click
+local LEMON_POST_WAIT    = 0      -- espera al cerrar la fruta (0 = sin pausa)
+local LEMON_PASS_WAIT    = 0.04   -- entre pasadas (antes 0.08)
+local LEMON_DOUBLE_CLICK = true   -- false = solo 1 click (~15% mas rapido)
+
 local function lemonKey(v)
     local pos = v.Position
     return mfloor(pos.X + 0.5) .. "," .. mfloor(pos.Y + 0.5) .. "," .. mfloor(pos.Z + 0.5)
 end
 
--- Procesa un único limón (extraído del bucle original sin cambios de método)
+-- ====== TREE GROUPING ======
+-- En lugar de manipular CanQuery por cada fruta (lo cual recorre tree:GetDescendants()
+-- N veces), agrupamos las frutas por arbol y hacemos el setup/teardown UNA sola vez
+-- por arbol. En arboles densos esto es 5-20x menos trabajo.
+
+local function findTreeOf(clickPart)
+    -- ClickPart -> Fruit -> LemonTree (o el ancestor mas cercano nombrado "Tree*" o "LemonTree")
+    local n = clickPart.Parent              -- Fruit
+    if n then return n.Parent end           -- LemonTree
+    return nil
+end
+
+local function disableTreeCanQuery(tree, excludeSet)
+    -- Pone CanQuery=false en todos los descendientes del arbol EXCEPTO los ClickParts
+    -- que vamos a clickear (estos siguen necesitando ser raycast-eables).
+    local modified, n = {}, 0
+    for _, part in ipairs_(tree:GetDescendants()) do
+        if part:IsA("BasePart") and not excludeSet[part] then
+            pcall_(function()
+                if part.CanQuery then
+                    part.CanQuery = false
+                    n = n + 1
+                    modified[n] = part
+                end
+            end)
+        end
+    end
+    return modified, n
+end
+
+local function restoreTreeCanQuery(modified, n)
+    for i = 1, n do
+        local part = modified[i]
+        pcall_(function() part.CanQuery = true end)
+    end
+end
+
+-- Procesa una sola fruta (sin tocar CanQuery -- eso se hace por arbol afuera)
 local function processLemon(v, hrp)
     if not v or not v:IsDescendantOf(Workspace) then return false end
 
-    local fruit    = v.Parent
-    local tree     = fruit and fruit.Parent
-    local modified = {}
-    local modCount = 0
-
-    if tree then
-        for _, part in ipairs_(tree:GetDescendants()) do
-            if part ~= v and part:IsA("BasePart") then
-                pcall_(function()
-                    part.CanQuery = false
-                    modCount = modCount + 1
-                    modified[modCount] = part
-                end)
-            end
-        end
-    end
-
-    -- HITBOX EXPANSION: guarda Size/Transparency/CanCollide originales y los agranda
+    -- HITBOX EXPANSION
     local origSize, origTransp, origCanColl = nil, nil, nil
     local hitboxApplied = false
     if LEMON_HITBOX_ENABLED then
@@ -581,23 +1732,23 @@ local function processLemon(v, hrp)
     local vp = v.Position
     local tpX, tpY, tpZ = vp.X, vp.Y - 4, vp.Z
     hrp.CFrame = CF(tpX, tpY, tpZ)
-    task_wait(0.02)
+    task_wait(LEMON_TP_WAIT)
 
     camera.lookAt(Vec3(tpX, tpY, tpZ), vp)
-    task_wait(0.02)
+    task_wait(LEMON_CAM_WAIT)
 
     local vps = camera.ViewportSize
     local cx  = mfloor(vps.X / 2)
     local cy  = mfloor(vps.Y / 2)
     mousemoveabs(cx, cy)
     mouse1click()
-    task_wait(0.015)
-    mouse1click()
+    if LEMON_DOUBLE_CLICK then
+        task_wait(LEMON_CLICK_GAP)
+        mouse1click()
+    end
 
-    -- Verifica si el limón desapareció ANTES de restaurar (el part puede estar muerto)
     local collected = not (v and v.Parent and v:IsDescendantOf(Workspace))
 
-    -- Restaurar hitbox original (solo si lo tocamos y el part sigue vivo)
     if hitboxApplied and not collected then
         pcall_(function()
             if origSize    ~= nil then v.Size         = origSize    end
@@ -606,14 +1757,73 @@ local function processLemon(v, hrp)
         end)
     end
 
-    -- Restaurar CanQuery de los demás parts del árbol
-    for j = 1, modCount do
-        local part = modified[j]
-        pcall_(function() part.CanQuery = true end)
-    end
-    task_wait(0.015)
-
+    if LEMON_POST_WAIT > 0 then task_wait(LEMON_POST_WAIT) end
     return collected
+end
+
+-- ====== VERIFY PASS TUNING ======
+-- Cuando el bucle principal termina (count==0, sameCountStreak o LEMON_MAX_PASSES)
+-- corremos pasadas de "verificacion" con failCount limpio para recoger frutas
+-- que se hayan salteado por posicion, timing del server o fallos previos.
+local LEMON_VERIFY_WAIT       = 0.15  -- pausa antes de re-verificar (server settle)
+local LEMON_VERIFY_MAX_PASSES = 3     -- max pasadas de verificacion seguidas
+
+-- Procesa un snapshot completo agrupando por arbol (extraido del loop principal
+-- para reusar en las pasadas de verificacion).
+local function processSnapshot(snapshot, hrp)
+    local count = #snapshot
+    if count == 0 then return 0 end
+
+    local groups, groupOrder = {}, {}
+    for i = 1, count do
+        local v = snapshot[i]
+        if v and v:IsDescendantOf(Workspace) then
+            local tree = findTreeOf(v) or v.Parent
+            local g = groups[tree]
+            if not g then
+                g = {}
+                groups[tree] = g
+                tinsert(groupOrder, tree)
+            end
+            tinsert(g, v)
+        end
+    end
+
+    local collectedCount = 0
+    for _, tree in ipairs_(groupOrder) do
+        if not lemonFarmActive then break end
+        local fruits = groups[tree]
+        local excludeSet = {}
+        for i = 1, #fruits do excludeSet[fruits[i]] = true end
+
+        local modified, modN
+        if tree then
+            modified, modN = disableTreeCanQuery(tree, excludeSet)
+        else
+            modified, modN = {}, 0
+        end
+
+        for i = 1, #fruits do
+            if not lemonFarmActive then break end
+            local v = fruits[i]
+            if v and v:IsDescendantOf(Workspace) then
+                local lk    = lemonKey(v)
+                local fails = lemonFailCount[lk] or 0
+                if fails < LEMON_MAX_FAILS then
+                    local ok = processLemon(v, hrp)
+                    if ok then
+                        lemonFailCount[lk] = nil
+                        collectedCount = collectedCount + 1
+                    else
+                        lemonFailCount[lk] = fails + 1
+                    end
+                end
+            end
+        end
+
+        if modN > 0 then restoreTreeCanQuery(modified, modN) end
+    end
+    return collectedCount
 end
 
 task_spawn(function()
@@ -630,8 +1840,6 @@ task_spawn(function()
             local lastSeenCount   = -1
             local sameCountStreak = 0
 
-            -- Bucle de pasadas: re-escanea hasta que no queden limones
-            -- (o se exceda el tope de seguridad)
             while ScriptActive and lemonFarmActive and pass < LEMON_MAX_PASSES do
                 pass = pass + 1
                 local snapshot = getLemonsFast()
@@ -640,8 +1848,6 @@ task_spawn(function()
 
                 if count == 0 then break end
 
-                -- Detecta estancamiento (mismo conteo en varias pasadas
-                -- = limones inalcanzables, no tiene sentido seguir)
                 if count == lastSeenCount then
                     sameCountStreak = sameCountStreak + 1
                     if sameCountStreak >= 2 then break end
@@ -650,33 +1856,40 @@ task_spawn(function()
                     lastSeenCount = count
                 end
 
-                -- Refresh del HRP por si el personaje se respawneó entre pasadas
                 local chr2 = player.Character
                 hrp = chr2 and chr2:FindFirstChild("HumanoidRootPart")
                 if not hrp then break end
 
-                for i = 1, count do
-                    if not lemonFarmActive then break end
-                    local v = snapshot[i]
-                    if v and v:IsDescendantOf(Workspace) then
-                        local lk    = lemonKey(v)
-                        local fails = lemonFailCount[lk] or 0
+                processSnapshot(snapshot, hrp)
 
-                        -- Salta limones que ya fallaron demasiadas veces este ciclo
-                        if fails < LEMON_MAX_FAILS then
-                            local ok = processLemon(v, hrp)
-                            if ok then
-                                lemonFailCount[lk] = nil
-                            else
-                                lemonFailCount[lk] = fails + 1
-                            end
-                        end
+                task_wait(LEMON_PASS_WAIT)
+            end
+
+            -- ====== PASADAS DE VERIFICACION ======
+            -- El loop principal pudo cortar por sameCountStreak/MAX_PASSES dejando
+            -- frutas sin recoger. Limpiamos failCount y damos hasta N intentos mas
+            -- con un pequeno wait para que el server actualice posiciones.
+            if lemonFarmActive then
+                for vp = 1, LEMON_VERIFY_MAX_PASSES do
+                    if not lemonFarmActive then break end
+                    lemonFailCount = {}
+                    task_wait(LEMON_VERIFY_WAIT)
+
+                    local chr3 = player.Character
+                    local hrp3 = chr3 and chr3:FindFirstChild("HumanoidRootPart")
+                    if not hrp3 then break end
+
+                    local verifySnap  = getLemonsFast()
+                    local verifyCount = #verifySnap
+                    lastLemonCount    = verifyCount
+                    if verifyCount == 0 then break end
+
+                    local collected = processSnapshot(verifySnap, hrp3)
+                    if collected == 0 then
+                        -- nada se recogio: probablemente inalcanzables, no insistir
+                        break
                     end
                 end
-
-                -- Pequeño wait entre pasadas para dejar que el server
-                -- procese los limones recién recogidos antes de re-escanear
-                task_wait(0.08)
             end
 
             task_wait(0.1)
@@ -712,7 +1925,6 @@ task_spawn(function()
         end
     end
 end)
-
 -- ==================== UI RENDER ====================
 local function Render()
     local upx, upy = uiPos.X, uiPos.Y
@@ -767,6 +1979,8 @@ local function Render()
         totalBought, totalFailed, (#localQueue - queueIndex + 1), #localQueue)
     StatusTxt.Position = Vec2(upx + 10, upy + usy - 16)
 end
+
+
 
 task_spawn(function()
     while ScriptActive do
@@ -836,6 +2050,63 @@ task_spawn(function()
     end
 end)
 
+-- ==================== AUTO STAND standalone loop ====================
+-- Corre independiente de AUTO BUY. Si AUTO BUY esta activo y hay botones vivos,
+-- cede el paso (no spamea para no chocar con el TP de compras). Si no, corre
+-- pasadas continuas TPeando a cada stand y spameando E.
+task_spawn(function()
+    local lastDiag = 0
+    local firstRun = true
+    while ScriptActive do
+        syncFromUI()
+        if not autoStandActive then
+            firstRun = true
+            task_wait(0.25)
+            continue
+        end
+
+        -- Asegurar tycoon
+        if not myTycoon or not myTycoon.Parent then
+            myTycoon = findMyTycoon()
+            if not myTycoon then
+                if tick_() - lastDiag > 3 then
+                    print("[Stand] esperando tycoon...")
+                    lastDiag = tick_()
+                end
+                task_wait(0.5)
+                continue
+            end
+        end
+
+        -- Si AUTO BUY esta corriendo y todavia hay botones vivos, cedele el paso
+        if autoBuyActive and _anyLiveButtons() then
+            task_wait(0.3)
+            continue
+        end
+
+        -- Pasada de stands. Manage mode (click directo) o TP mode (legacy).
+        local res
+        if STAND_MODE == "manage" then
+            res = runManagePass(firstRun)
+            -- Fallback automatico: si Manage esta vacio, probamos TP.
+            if res == "done" and #_getManageStands() == 0 then
+                if firstRun then
+                    print("[Stand] Manage vacio, fallback a TP-mode esta pasada")
+                end
+                res = runStandPass(firstRun)
+            end
+        else
+            res = runStandPass(firstRun)
+        end
+        firstRun = false
+        if res == "off" then
+            task_wait(0.05)
+            continue
+        end
+        task_wait(STAND_LOOP_DELAY)
+    end
+end)
+
 _G.MatchaCleanup = function()
     ScriptActive = false
     for _, obj in ipairs_(drawObjs) do
@@ -844,4 +2115,4 @@ _G.MatchaCleanup = function()
     print("[Hub] Cleanup done")
 end
 
-print("[Hub] v5.2 Single Fast Worker Loaded (OPTIMIZED)")
+print("[Hub] v5.16.13 Loaded - color detection via memoria (skip gris instantaneo)")
